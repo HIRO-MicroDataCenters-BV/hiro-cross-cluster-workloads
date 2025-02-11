@@ -1,0 +1,79 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pod-watcher-sa
+  namespace: hiro
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pod-watcher-clusterrole
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pod-watcher-clusterrolebinding
+subjects:
+- kind: ServiceAccount
+  name: pod-watcher-sa
+  namespace: hiro
+roleRef:
+  kind: ClusterRole
+  name: pod-watcher-clusterrole
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workload-donor
+  namespace: hiro
+  labels:
+    app: workload-donor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: workload-donor
+  template:
+    metadata:
+      labels:
+        app: workload-donor
+    spec:
+      serviceAccountName: pod-watcher-sa
+      containers:
+        - name: workload-donor
+          image: workloaddonor:alpha1
+          imagePullPolicy: IfNotPresent
+          env:
+          - name: NATS_URL
+            value: "demo.nats.io:4222"  
+          - name: NATS_WORKLOAD_SUBJECT
+            value: "WorkStealingPod"
+          - name: NATS_RETURN_WORKLOAD_SUBJECT
+            value: "ReturnWorkStealingPod"
+          - name: NO_WORK_LOAD_STEAL_LABLE
+            value: "NoWorkLoadSteal"
+          - name: IGNORE_NAMESPACES
+            value: "default,kube-system,local-path-storage,hiro"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "250m"
+            limits:
+              memory: "128Mi"
+              cpu: "500m"
+          ports:
+            - containerPort: 8443
+          volumeMounts:
+            - name: tls-certs
+              mountPath: /etc/certs
+              readOnly: true
+      volumes:
+        - name: tls-certs
+          secret:
+            secretName: workload-donor-tls

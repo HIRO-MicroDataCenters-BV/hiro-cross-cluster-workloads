@@ -1,0 +1,71 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pod-creator-sa
+  namespace: hiro
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pod-creator-clusterrole
+rules:
+- apiGroups: [""]
+  resources: ["pods", "namespaces"]
+  verbs: ["get", "list", "watch", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pod-creator-clusterrolebinding
+subjects:
+- kind: ServiceAccount
+  name: pod-creator-sa
+  namespace: hiro
+roleRef:
+  kind: ClusterRole
+  name: pod-creator-clusterrole
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workload-stealer
+  namespace: hiro
+  labels:
+    app: workload-stealer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: workload-stealer
+  template:
+    metadata:
+      labels:
+        app: workload-stealer
+    spec:
+      serviceAccountName: pod-creator-sa
+      containers:
+        - name: workload-stealer
+          image: workloadstealer:alpha1
+          imagePullPolicy: IfNotPresent
+          env:
+          - name: NATS_URL
+            value: "demo.nats.io:4222"  
+          - name: NATS_WORKLOAD_SUBJECT
+            value: "WorkStealingPod"
+          - name: NATS_RETURN_WORKLOAD_SUBJECT
+            value: "ReturnWorkStealingPod"
+          - name: WORK_LOAD_STEAL_LABLE
+            value: "WorkLoadSteal"  
+          - name: IGNORE_NAMESPACES
+            value: "default,kube-system,local-path-storage,hiro"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "250m"
+            limits:
+              memory: "128Mi"
+              cpu: "500m"
+          
+          

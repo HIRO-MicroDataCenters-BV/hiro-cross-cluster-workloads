@@ -1,0 +1,27 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: workload-donor
+webhooks:
+  - name: "workload-donor.hiro.svc"
+    admissionReviewVersions: ["v1"]
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values: [ "default", "kube-system", "local-path-storage", "hiro", ]
+    rules:
+      - operations: [ "CREATE"]
+        apiGroups: [ "" ]
+        apiVersions: [ "v1" ]
+        resources: [ "pods" ]
+        scope:       "*"
+    clientConfig:
+      service:
+        namespace: hiro
+        name: workload-donor
+        path: "/mutate"
+      caBundle: <ENCODED_CA>
+    sideEffects: None
+    timeoutSeconds: 10
+
