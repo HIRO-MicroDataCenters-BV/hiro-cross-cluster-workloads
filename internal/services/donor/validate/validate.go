@@ -29,7 +29,6 @@ var (
 	k8SNamespaces = []string{"default", "kube-system", "kube-public",
 		"kube-node-lease", "kube-admission", "kube-proxy", "kube-controller-manager",
 		"kube-scheduler", "kube-dns"}
-	jetStreamBucket          = "message_tracking"
 	waitTimeForACK           = 5
 	nodeSelectorUUID         = uuid.New().String()
 	mutatePodNodeSelectorMap = map[string]string{
@@ -127,38 +126,25 @@ func Inform(pod *corev1.Pod, vconfig donor.DVConfig) (string, error) {
 	slog.Info("Connected to NATS server")
 
 	// Connect to JetStreams
-	js, err := natsConnect.JetStream()
+	js, err := vconfig.Nconfig.FetchJetStream(natsConnect)
 	if err != nil {
 		slog.Error("Failed to connect to JetStreams server: ", "error", err)
 		return "", err
 	}
-	slog.Info("Connected to JetStream")
 
+	jsStreamName := "Stream" + vconfig.Nconfig.NATSSubject
 	// Create a stream for message processing
-	_, err = js.AddStream(&nats.StreamConfig{
-		Name:      "Stream" + vconfig.Nconfig.NATSSubject,
-		Subjects:  []string{vconfig.Nconfig.NATSSubject},
-		Storage:   nats.FileStorage,
-		Replicas:  1,
-		Retention: nats.WorkQueuePolicy, // Ensures a message is only processed once
-	})
-	if err != nil && err != nats.ErrStreamNameAlreadyInUse {
-		slog.Error("Failed to add a streams to JetStream server: ", "error", err)
-	}
+	vconfig.Nconfig.CreateJetStreamStream(js, jsStreamName)
 
 	// Create or get the KV Store for message tracking
-	kv, err := js.KeyValue(jetStreamBucket)
-	if err != nil && err != nats.ErrBucketNotFound {
-		slog.Error("Failed to get KeyVlaue: ", "error", err)
+	kv, err := vconfig.Nconfig.CreateOrGetKeyValueStore(js, common.JetStreamBucket)
+	if err != nil {
+		slog.Error("Failed to get KeyValue: ", "error", err)
 		return "", err
-	}
-	if kv == nil {
-		kv, _ = js.CreateKeyValue(&nats.KeyValueConfig{Bucket: jetStreamBucket})
-		slog.Info("Created a new KeyValue bucket", "bucket", jetStreamBucket)
 	}
 
 	// Store "Pending" in KV Store
-	_, err = kv.Put(vconfig.DonorUUID, []byte("Pending"))
+	err = vconfig.Nconfig.PutKeyValue(kv, vconfig.DonorUUID, "Pending")
 	if err != nil {
 		slog.Error("Failed to put value in KV bucket: ", "error", err)
 	}
@@ -176,35 +162,24 @@ func Inform(pod *corev1.Pod, vconfig donor.DVConfig) (string, error) {
 		return "", err
 	}
 
-	// // Check if the stream exists
-	// streamInfo, err := js.StreamInfo(nsubject)
-	// if err != nil {
-	// 	slog.Error("Failed to get stream info", "error", err)
-	// 	return "", err
-	// }
-	// slog.Info("Stream info", "info", streamInfo)
-
 	// Publish notification to JetStreams
-	_, err = js.Publish(vconfig.Nconfig.NATSSubject, metadataJSON)
+	err = vconfig.Nconfig.PublishJSMessage(js, metadataJSON)
 	if err != nil {
-		slog.Error("Failed to publish message to NATS", "error", err, "subject", vconfig.Nconfig.NATSSubject, "donorUUID", vconfig.DonorUUID)
+		slog.Error("Failed to publish message to JS", "error", err, "subject", vconfig.Nconfig.NATSSubject, "donorUUID", vconfig.DonorUUID)
 		return "", err
 	}
 
-	// err = natsConnect.Publish(nsubject, metadataJSON)
-	// if err != nil {
-	// 	slog.Error("Failed to publish message to NATS", "error", err, "subject", nsubject, "donorUUID", donorUUID)
-	// 	return "", err
-	// }
+	slog.Info("Published Pod metadata to JS", "subject", vconfig.Nconfig.NATSSubject, "metadata", string(metadataJSON), "donorUUID", vconfig.DonorUUID)
 
-	slog.Info("Published Pod metadata to NATS", "subject", vconfig.Nconfig.NATSSubject, "metadata", string(metadataJSON), "donorUUID", vconfig.DonorUUID)
+	return WaitToGetPodStolen(vconfig.WaitToGetPodStolen, kv, vconfig)
+}
 
-	slog.Info(fmt.Sprintf("Waiting for %d seconds for ACK", waitTimeForACK))
-	for i := 0; i < waitTimeForACK; i++ {
+func WaitToGetPodStolen(waitTime int, kv nats.KeyValue, vconfig donor.DVConfig) (string, error) {
+	slog.Info(fmt.Sprintf("Waiting for %d seconds for ACK", waitTime))
+	for i := 0; i < waitTime; i++ {
 		time.Sleep(1 * time.Second) // Wait for 1 second
-		entry, err := kv.Get(vconfig.DonorUUID)
-		if err == nil && string(entry.Value()) != "Pending" {
-			stealerUUID := string(entry.Value())
+		stealerUUID, err := vconfig.Nconfig.GetKeyValue(kv, vconfig.DonorUUID)
+		if err == nil && string(stealerUUID) != "Pending" {
 			slog.Info("Published Pod metadata was processed", "donorUUID", vconfig.DonorUUID, "stealerUUID", stealerUUID)
 			return stealerUUID, nil
 		}

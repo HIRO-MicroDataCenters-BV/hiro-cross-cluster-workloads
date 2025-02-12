@@ -26,8 +26,8 @@ func main() {
 
 	slog.Info("Configuring Worker")
 	natsConfig := natsconnect.NATSClient{
-		NATSURL:     getENVValue("NATS_URL"),
-		NATSSubject: getENVValue("NATS_WORKLOAD_SUBJECT"),
+		NATSURL:     getENVValue("NATS_URL").(string),
+		NATSSubject: getENVValue("NATS_WORKLOAD_SUBJECT").(string),
 	}
 	workerConfig := stealer.SWConfig{
 		Nclient:     natsConfig,
@@ -40,13 +40,13 @@ func main() {
 
 	slog.Info("Configuring Informer")
 	informerNATSConfig := natsconnect.NATSClient{
-		NATSURL:     getENVValue("NATS_URL"),
-		NATSSubject: getENVValue("NATS_RETURN_WORKLOAD_SUBJECT"),
+		NATSURL:     getENVValue("NATS_URL").(string),
+		NATSSubject: getENVValue("NATS_RETURN_WORKLOAD_SUBJECT").(string),
 	}
 	informerConfig := stealer.SIConfig{
 		Nclient:          informerNATSConfig,
 		StealerUUID:      stealerUUID,
-		IgnoreNamespaces: strings.Split(getENVValue("IGNORE_NAMESPACES"), ","),
+		IgnoreNamespaces: strings.Split(getENVValue("IGNORE_NAMESPACES").(string), ","),
 	}
 	informer, err := informer.New(informerConfig)
 	if err != nil {
@@ -69,12 +69,16 @@ func init() {
 	viper.AutomaticEnv()       // Automatically read environment variables
 }
 
-func getENVValue(envKey string) string {
+func getENVValue(envKey string) any {
 	// Read environment variables
-	value := viper.GetString(envKey)
-	if value == "" {
+	valueStr := viper.GetString(envKey)
+	valueInt := viper.GetInt(envKey)
+	if valueStr == "" && valueInt == 0 {
 		message := fmt.Sprintf("%s environment variable is not set", envKey)
 		log.Fatal(message)
 	}
-	return value
+	if valueStr != "" {
+		return valueStr
+	}
+	return valueInt
 }

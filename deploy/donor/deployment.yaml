@@ -60,6 +60,8 @@ spec:
             value: "NoWorkLoadSteal"
           - name: IGNORE_NAMESPACES
             value: "default,kube-system,local-path-storage,hiro"
+          - name: WAIT_TIME_TO_GET_WORKLOAD_STOLEN_IN_MIN
+            value: "5"
           resources:
             requests:
               memory: "64Mi"

@@ -33,6 +33,17 @@ func (ns *NATSClient) PublishNATSMessage(natsConnect *nats.Conn, message string)
 	return nil
 }
 
+func (ns *NATSClient) PublishJSMessage(js nats.JetStreamContext, metadataJSON []byte) error {
+	// Publish notification to JetStreams
+	_, err := js.Publish(ns.NATSSubject, metadataJSON)
+	if err != nil {
+		slog.Error("Failed to publish message to NATS", "error", err, "subject", ns.NATSSubject, "metadataJSON", metadataJSON)
+		return err
+	}
+	slog.Info("Published message to Jet Streams")
+	return nil
+}
+
 func (ns *NATSClient) FetchJetStream(natsConnect *nats.Conn) (nats.JetStreamContext, error) {
 	// Connect to JetStreams
 	js, err := natsConnect.JetStream()

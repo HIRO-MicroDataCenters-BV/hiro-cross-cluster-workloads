@@ -36,14 +36,15 @@ func main() {
 
 	slog.Info("Configuring Validator")
 	natsConfig := natsconnect.NATSClient{
-		NATSURL:     getENVValue("NATS_URL"),
-		NATSSubject: getENVValue("NATS_WORKLOAD_SUBJECT"),
+		NATSURL:     getENVValue("NATS_URL").(string),
+		NATSSubject: getENVValue("NATS_WORKLOAD_SUBJECT").(string),
 	}
 	validatorConfig := donor.DVConfig{
-		Nconfig:          natsConfig,
-		DonorUUID:        donorUUID,
-		IgnoreNamespaces: strings.Split(getENVValue("IGNORE_NAMESPACES"), ","),
-		LableToFilter:    getENVValue("NO_WORK_LOAD_STEAL_LABLE"),
+		Nconfig:            natsConfig,
+		DonorUUID:          donorUUID,
+		IgnoreNamespaces:   strings.Split(getENVValue("IGNORE_NAMESPACES").(string), ","),
+		LableToFilter:      getENVValue("NO_WORK_LOAD_STEAL_LABLE").(string),
+		WaitToGetPodStolen: getENVValue("WAIT_TIME_TO_GET_WORKLOAD_STOLEN_IN_MIN").(int),
 	}
 	validator, err := validate.New(validatorConfig)
 	if err != nil {
@@ -61,8 +62,8 @@ func main() {
 
 	slog.Info("Configuring Worker")
 	workerNATSConfig := natsconnect.NATSClient{
-		NATSURL:     getENVValue("NATS_URL"),
-		NATSSubject: getENVValue("NATS_RETURN_WORKLOAD_SUBJECT"),
+		NATSURL:     getENVValue("NATS_URL").(string),
+		NATSSubject: getENVValue("NATS_RETURN_WORKLOAD_SUBJECT").(string),
 	}
 	workerConfig := donor.DWConfig{
 		Nclient:   workerNATSConfig,
@@ -98,12 +99,16 @@ func init() {
 	viper.AutomaticEnv()       // Automatically read environment variables
 }
 
-func getENVValue(envKey string) string {
+func getENVValue(envKey string) any {
 	// Read environment variables
-	value := viper.GetString(envKey)
-	if value == "" {
+	valueStr := viper.GetString(envKey)
+	valueInt := viper.GetInt(envKey)
+	if valueStr == "" && valueInt == 0 {
 		message := fmt.Sprintf("%s environment variable is not set", envKey)
 		log.Fatal(message)
 	}
-	return value
+	if valueStr != "" {
+		return valueStr
+	}
+	return valueInt
 }

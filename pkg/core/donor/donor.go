@@ -13,10 +13,11 @@ type DWConfig struct {
 }
 
 type DVConfig struct {
-	Nconfig          natsconnect.NATSClient
-	DonorUUID        string
-	LableToFilter    string
-	IgnoreNamespaces []string
+	Nconfig            natsconnect.NATSClient
+	DonorUUID          string
+	LableToFilter      string
+	IgnoreNamespaces   []string
+	WaitToGetPodStolen int
 }
 
 // Create a struct with donorUUID and pod object
