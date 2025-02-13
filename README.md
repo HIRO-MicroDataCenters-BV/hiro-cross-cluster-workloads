@@ -14,20 +14,23 @@ To install the stealer, follow these steps:
     git clone https://github.com/HIRO-MicroDataCenters-BV/hiro-cross-cluster-workloads.git
     cd hiro-cross-cluster-workloads
     chmod +x scripts/stealer/*
+    chmod +x start_stealer.sh 
     ```
 
 2. **Start the Stealer**:
-   Run the `start_stealer.sh` script to execute both the `initialize.sh` and `install.sh` scripts sequentially. This script ensures that the initialization and installation steps are completed successfully.
+   Run the `start_stealer.sh` script to execute both the `initialize.sh` and `install.sh` scripts sequentially. This script ensures that the initialization(cluster creation) and installation(image upload and app installemnt) steps are completed successfully.
    ```sh
-   ./start_stealer.sh
+   ./start_stealer.sh <stealer_cluster_name>
    ```
+   Eg: ./start_stealer.sh stealer
 
     **Redeploy the Stealer**:
     If you need to redeploy the stealer server, you can use the `redeploy.sh` script. This script will rebuild the Docker image and redeploy the worker server without reinitializing the Kind cluster.
     ```sh
     cd scripts/stealer
-    ./redeploy.sh
+    ./scripts/stealer/redeploy.sh <stealer_cluster_name>
     ```
+    Eg: ./redeploy.sh stealer
 
 To install the donor, follow these steps:
 1. **Clone the Repository**:
@@ -36,23 +39,24 @@ To install the donor, follow these steps:
     git clone https://github.com/HIRO-MicroDataCenters-BV/hiro-cross-cluster-workloads.git
     cd hiro-cross-cluster-workloads
     chmod +x scripts/donor/*
+    chmod +x start_donor.sh 
     ```
 2. **Run the `start_donor.sh` script**:
     The `start_donor.sh` script initializes the Kind cluster, builds and installs the application, and sets up the necessary configurations to mark the pods as donors.
     ```sh
-    ./start_donor.sh
+    ./start_donor.sh <donor_cluster_name>
     ```
+    Eg: ./start_donor.sh donor
 
     **Redeploy the Donor**:
     If you need to redeploy the donor server, you can use the `redeploy.sh` script. This script will rebuild the Docker image and redeploy the worker server without reinitializing the Kind cluster.
     ```sh
-    cd scripts/donor
-    ./redeploy.sh
+    ./scripts/donor/redeploy.sh <donor_cluster_name>
     ```
+    Eg: ./redeploy.sh donor
 
 3. **Test by deploying a pod**:
     Once the above components are installed, test them by running `scripts/test_pod_steal.sh`
     ```sh
-    cd scripts
-    ./test_pod_steal.sh
+    ./scripts/donor/test_pod_steal.sh
     ```
