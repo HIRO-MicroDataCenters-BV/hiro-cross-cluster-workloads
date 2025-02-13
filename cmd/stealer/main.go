@@ -6,8 +6,6 @@ import (
 	"log/slog"
 	"strings"
 
-	// "workloadstealworker/pkg/informer"
-	// "workloadstealworker/pkg/worker"
 	"hirocrossclusterworkloads/internal/services/stealer/informer"
 	"hirocrossclusterworkloads/internal/services/stealer/worker"
 	natsconnect "hirocrossclusterworkloads/pkg/connector/nats"
