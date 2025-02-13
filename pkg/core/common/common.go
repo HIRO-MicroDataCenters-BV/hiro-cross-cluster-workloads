@@ -3,11 +3,16 @@ package common
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
 
 var (
+	runtimeScheme      = runtime.NewScheme()
+	codecFactory       = serializer.NewCodecFactory(runtimeScheme)
+	Deserializer       = codecFactory.UniversalDeserializer()
 	JetStreamBucket    = "message_tracking"
 	JetStreamQueue     = "worker-group" //should be same for all workers/stealers
 	StolenPodLablesMap = map[string]string{

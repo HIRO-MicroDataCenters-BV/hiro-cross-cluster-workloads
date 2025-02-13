@@ -7,10 +7,6 @@ import (
 	"log/slog"
 	"strings"
 
-	// "workloadstealagent/pkg/controller"
-	// "workloadstealagent/pkg/validate"
-	// "workloadstealagent/pkg/worker"
-
 	"hirocrossclusterworkloads/internal/services/donor/controller"
 	"hirocrossclusterworkloads/internal/services/donor/validate"
 	"hirocrossclusterworkloads/internal/services/donor/worker"
@@ -29,7 +25,7 @@ var (
 func main() {
 	stopChan := make(chan bool)
 
-	// To Do: Every resrat of the donor will have a new UUID.
+	// To Do: Every restrat of the donor will have a new UUID.
 	// This logic has to be changed so that the UUID is persisted.
 	donorUUID := uuid.New().String()
 	// donorUUID := "b458a190-4744-46f4-b16b-2739cf9fccb8"

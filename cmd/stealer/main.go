@@ -20,8 +20,8 @@ import (
 func main() {
 	stopChan := make(chan bool)
 
-	// To Do: Every resrat of the worker will have a new UUID.
-	// This logic has to be changed so that the UUID is persisted.
+	// To Do: Every restrat of the worker will have a new UUID.
+	// This logic has to be changed so that the UUID will never change.
 	stealerUUID := uuid.New().String()
 
 	slog.Info("Configuring Worker")

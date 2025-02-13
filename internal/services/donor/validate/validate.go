@@ -16,20 +16,11 @@ import (
 	admission "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/serializer"
 
 	"k8s.io/client-go/kubernetes"
 )
 
 var (
-	runtimeScheme = runtime.NewScheme()
-	codecFactory  = serializer.NewCodecFactory(runtimeScheme)
-	deserializer  = codecFactory.UniversalDeserializer()
-	k8SNamespaces = []string{"default", "kube-system", "kube-public",
-		"kube-node-lease", "kube-admission", "kube-proxy", "kube-controller-manager",
-		"kube-scheduler", "kube-dns"}
-	waitTimeForACK           = 5
 	nodeSelectorUUID         = uuid.New().String()
 	mutatePodNodeSelectorMap = map[string]string{
 		"node-stolen": "true",
@@ -74,7 +65,7 @@ func (v *validator) Mutate(ar admission.AdmissionReview) *admission.AdmissionRes
 	}
 	raw := ar.Request.Object.Raw
 	pod := corev1.Pod{}
-	if _, _, err := deserializer.Decode(raw, nil, &pod); err != nil {
+	if _, _, err := common.Deserializer.Decode(raw, nil, &pod); err != nil {
 		slog.Error("failed to decode pod", "error", err)
 		return &admission.AdmissionResponse{
 			Result: &metav1.Status{
@@ -87,10 +78,11 @@ func (v *validator) Mutate(ar admission.AdmissionReview) *admission.AdmissionRes
 		slog.Info("Pod is not eligible to steal as it has the label", "name", pod.Name, "label", v.vconfig.LableToFilter)
 		return &admission.AdmissionResponse{Allowed: true}
 	}
-	inamespaces := v.vconfig.IgnoreNamespaces
+	ignoreNamespaces := v.vconfig.IgnoreNamespaces
 	slog.Info("Pod create event", "namespace", pod.Namespace, "name", pod.Name)
-	if contains(inamespaces, pod.Namespace) {
-		slog.Info("Ignoring as Pod belongs to Ignored Namespaces", "namespaces", inamespaces)
+	uniqueIgnoredNamespaces := common.MergeUnique(ignoreNamespaces, common.K8SNamespaces)
+	if common.IsItIgnoredNamespace(uniqueIgnoredNamespaces, pod.Namespace) {
+		slog.Info("Ignoring as Pod belongs to Ignored Namespaces", "namespaces", ignoreNamespaces)
 		return nil
 	}
 
@@ -98,7 +90,7 @@ func (v *validator) Mutate(ar admission.AdmissionReview) *admission.AdmissionRes
 	// Make the pod to be stolen
 	stolerUUID, err := Inform(&pod, v.vconfig)
 	if err != nil && stolerUUID == "" {
-		slog.Error("Failed to make the pod to be stolen", "name", pod.Name, "namespace", pod.Namespace, "error", err)
+		slog.Warn("Failed to make the pod to be stolen", "name", pod.Name, "namespace", pod.Namespace, "error", err)
 		return &admission.AdmissionResponse{Allowed: true}
 	}
 	slog.Info("Pod got stolen", "name", pod.Name, "namespace", pod.Namespace, "stealerUUID", stolerUUID)
@@ -184,35 +176,8 @@ func WaitToGetPodStolen(waitTime int, kv nats.KeyValue, vconfig donor.DVConfig) 
 			return stealerUUID, nil
 		}
 	}
-	slog.Error("No Stealer is ready to stole within the wait time", "donorUUID", vconfig.DonorUUID, "WaitTimeForACK", waitTimeForACK)
+	slog.Error("No Stealer is ready to stole within the wait time", "donorUUID", vconfig.DonorUUID, "WaitTimeForACK", waitTime)
 	return "", fmt.Errorf("no Stealer is ready to stole within the wait time for donorUUID: %s", vconfig.DonorUUID)
-}
-
-func contains(list []string, item string) bool {
-	for _, str := range mergeUnique(list, k8SNamespaces) {
-		if str == item {
-			return true
-		}
-	}
-	return false
-}
-
-func mergeUnique(slice1, slice2 []string) []string {
-	uniqueMap := make(map[string]bool)
-	result := []string{}
-
-	for _, item := range slice1 {
-		uniqueMap[item] = true
-	}
-	for _, item := range slice2 {
-		uniqueMap[item] = true
-	}
-
-	for key := range uniqueMap {
-		result = append(result, key)
-	}
-
-	return result
 }
 
 func mutatePod(pod *corev1.Pod, donorUUID string, stealerUUID string) *admission.AdmissionResponse {
