@@ -263,7 +263,7 @@ func pollStolenPodStatus(kv nats.KeyValue, kvKey string, timeoutInMin int) error
 					return err
 				}
 				var status = pollDetails.Status
-				fmt.Printf("Polled details: %s\n", status)
+				fmt.Printf("Pod Poll details: %s\n", status)
 
 				if status == common.PodFinishedStatus {
 					fmt.Println("Pod Processing Completed!")

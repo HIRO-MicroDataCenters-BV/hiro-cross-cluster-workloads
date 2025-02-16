@@ -258,11 +258,21 @@ func checkForAnyFailuresOrRestarts(cli *kubernetes.Clientset, pod *corev1.Pod, k
 			}
 
 			podPollDetails := common.PodPollDetails{
-				Status:    string(currentPod.Status.Phase),
+				//Status:    string(currentPod.Status.Phase),
 				Duration:  metav1.Now().Sub(pod.Status.StartTime.Time).String(),
 				Name:      pod.Name,
 				Namespace: pod.Namespace,
 			}
+			if currentPod.Status.Phase == corev1.PodFailed || currentPod.Status.Phase == corev1.PodUnknown {
+				slog.Error("Pod has failed", "podName", pod.Name, "podNamespace", pod.Namespace)
+				podPollDetails.Status = string(common.PodFailedStatus)
+			} else if currentPod.Status.Phase == corev1.PodSucceeded {
+				slog.Info("Pod has succeeded", "podName", pod.Name, "podNamespace", pod.Namespace)
+				podPollDetails.Status = string(common.PodFinishedStatus)
+			} else {
+				podPollDetails.Status = string(currentPod.Status.Phase)
+			}
+
 			slog.Info("polling the Pod", "podPollDetails", podPollDetails)
 			podPollDetailsBytes, err := json.Marshal(podPollDetails)
 			if err != nil {
@@ -270,10 +280,6 @@ func checkForAnyFailuresOrRestarts(cli *kubernetes.Clientset, pod *corev1.Pod, k
 				return err
 			}
 			kv.Put(kvKey, podPollDetailsBytes)
-			if currentPod.Status.Phase == corev1.PodFailed || currentPod.Status.Phase == corev1.PodUnknown {
-				slog.Error("Pod has failed", "podName", pod.Name, "podNamespace", pod.Namespace)
-				return fmt.Errorf("pod has failed: podName=%s, podNamespace=%s", pod.Name, pod.Namespace)
-			}
 
 			// if currentPod.Status.Phase == corev1.PodRunning {
 			// 	podPollDetails := common.PodPollDetails{
