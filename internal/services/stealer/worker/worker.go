@@ -38,40 +38,24 @@ func New(config stealer.SWConfig) (stealer.Stealer, error) {
 func (c *Consume) Start(stopChan chan<- bool) error {
 	defer func() { stopChan <- true }()
 
-	// Connect to NATS server
-	natsConnect, err := c.Config.Nclient.FetchNATSConnect()
+	natsConnect, js, kv, err := c.Config.Nclient.GetNATSConnectJetStreamAndKeyValue()
 	if err != nil {
-		slog.Error("Failed to connect to NATS server: ", "error", err)
+		slog.Error("Failed to connect to NATS/JS/KV", "error", err, "natsConnect", natsConnect, "js", js, "kv", kv)
 		return err
 	}
 	defer natsConnect.Close()
 
-	// Connect to JetStreams
-	js, err := c.Config.Nclient.FetchJetStream(natsConnect)
-	if err != nil {
-		slog.Error("Failed to connect to JetStreams server: ", "error", err)
-		return err
-	}
-
-	jsStreamName := "Stream" + c.Config.Nclient.NATSSubject
-	// Create a stream for message processing
-	c.Config.Nclient.CreateJetStreamStream(js, jsStreamName)
-
-	// Create or get the KV Store for message tracking
-	kv, err := c.Config.Nclient.CreateOrGetKeyValueStore(js, common.JetStreamBucket)
-	if err != nil {
-		slog.Error("Failed to get KeyValue: ", "error", err)
-		return err
-	}
-
-	slog.Info("Subscribe to Pod stealing messages...", "stream", jsStreamName,
-		"queue", common.JetStreamQueue, "subject", c.Config.Nclient.NATSSubject)
+	jetStreamName := c.Config.Nclient.GetJetStreamName()
+	jetStreamQueue := c.Config.Nclient.GetJetStreamQueueName()
+	slog.Info("Subscribe to Pod stealing messages...", "stream", jetStreamName,
+		"queue", jetStreamQueue, "subject", c.Config.Nclient.NATSSubject)
 
 	// Queue Group ensures only one consumer gets a message
-	js.QueueSubscribe(c.Config.Nclient.NATSSubject, common.JetStreamQueue, func(msg *nats.Msg) {
+	js.QueueSubscribe(c.Config.Nclient.NATSSubject, jetStreamQueue, func(msg *nats.Msg) {
 		var pod corev1.Pod
 		var donorPod common.DonorPod
 		var donorUUID string
+		var kvKey string
 		var stealerUUID = c.Config.StealerUUID
 		slog.Info("Received message", "subject", c.Config.Nclient.NATSSubject, "data", string(msg.Data))
 
@@ -99,11 +83,12 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 			return
 		}
 		donorUUID = donorPod.DonorUUID
-		slog.Info("Deserialized donorUUID", "donorUUID", donorUUID)
+		kvKey = donorPod.KVKey
+		slog.Info("Deserialized", "donorUUID", donorUUID, "kvKey", kvKey)
 
 		// Check if message is already processed
-		entry, err := kv.Get(donorUUID)
-		if err == nil && string(entry.Value()) != "Pending" {
+		entry, err := kv.Get(kvKey)
+		if err == nil && string(entry.Value()) != common.DonorKVValuePending {
 			otherStealerUUID := string(entry.Value())
 			if otherStealerUUID == stealerUUID {
 				slog.Info("Skipping Pod, I am already processed it", "podName", pod.Name,
@@ -118,13 +103,13 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 		}
 
 		// Mark with stealerUUID in KV by this stealer
-		_, err = kv.Put(donorUUID, []byte(stealerUUID))
+		_, err = kv.Put(kvKey, []byte(stealerUUID))
 		if err != nil && !errors.Is(err, nats.ErrKeyExists) {
 			slog.Error("Failed to put value in KV bucket: ", "error", err)
 			msg.Nak()
 		}
 
-		_, err = StealPod(c.Cli, pod, donorUUID, stealerUUID)
+		createdPod, err := StealPod(c.Cli, pod, donorUUID, stealerUUID)
 		if err != nil {
 			slog.Error("Failed to steal Pod", "error", err)
 			msg.Nak()
@@ -132,6 +117,11 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 
 		// Acknowledge JetStream message
 		msg.Ack()
+
+		// Watch the created pod for every 5 sec and send it status to donor
+		go func() {
+			checkForAnyFailuresOrRestarts(c.Cli, createdPod, kv, kvKey, 10)
+		}()
 
 	})
 	select {}
@@ -244,6 +234,64 @@ func isPodSuccesfullyRunning(clientset *kubernetes.Clientset, namespace, name st
 				slog.Info("Pod is now Running", "namespace", namespace, "name", name)
 				return true
 			}
+		}
+	}
+}
+
+func checkForAnyFailuresOrRestarts(cli *kubernetes.Clientset, pod *corev1.Pod, kv nats.KeyValue, kvKey string, timeoutInMin int) error {
+	// Start polling the KV store for status updates
+	pollTimeout := time.After(time.Duration(timeoutInMin) * 60 * time.Second)
+	for {
+		select {
+		case <-pollTimeout:
+			slog.Error("Polling Timeout: No response received!")
+			return fmt.Errorf("polling timeout: no response received, timeout: %d", timeoutInMin)
+		default:
+			currentPod, err := cli.CoreV1().Pods(pod.Namespace).Get(context.TODO(), pod.Name, metav1.GetOptions{})
+			entry, getErr := kv.Get(kvKey)
+			if apierrors.IsNotFound(err) && (getErr == nil && string(entry.Value()) == string(corev1.PodSucceeded)) {
+				slog.Warn("Pod not found. It executed successfully", "podName", pod.Name, "podNamespace", pod.Namespace)
+				return nil
+			} else if err != nil {
+				slog.Error("Error retrieving Pod", "podName", pod.Name, "podNamespace", pod.Namespace, "error", err)
+				return err
+			}
+
+			podPollDetails := common.PodPollDetails{
+				Status:    string(currentPod.Status.Phase),
+				Duration:  metav1.Now().Sub(pod.Status.StartTime.Time).String(),
+				Name:      pod.Name,
+				Namespace: pod.Namespace,
+			}
+			slog.Info("polling the Pod", "podPollDetails", podPollDetails)
+			podPollDetailsBytes, err := json.Marshal(podPollDetails)
+			if err != nil {
+				slog.Error("Failed to marshal podPollDetails", "error", err)
+				return err
+			}
+			kv.Put(kvKey, podPollDetailsBytes)
+			if currentPod.Status.Phase == corev1.PodFailed || currentPod.Status.Phase == corev1.PodUnknown {
+				slog.Error("Pod has failed", "podName", pod.Name, "podNamespace", pod.Namespace)
+				return fmt.Errorf("pod has failed: podName=%s, podNamespace=%s", pod.Name, pod.Namespace)
+			}
+
+			// if currentPod.Status.Phase == corev1.PodRunning {
+			// 	podPollDetails := common.PodPollDetails{
+			// 		Status:   string(corev1.PodRunning),
+			// 		Duration: metav1.Now().Sub(pod.Status.StartTime.Time).String(),
+			// 	}
+			// 	slog.Info("Pod is still Running", "podPollDetails", podPollDetails)
+			// 	kv.Put(kvKey, []byte(corev1.PodRunning))
+			// } else if currentPod.Status.Phase == corev1.PodFailed {
+			// 	slog.Error("Pod has failed", "podName", pod.Name, "podNamespace", pod.Namespace)
+			// 	kv.Put(kvKey, []byte(corev1.PodFailed))
+			// 	break
+			// } else if currentPod.Status.Phase == corev1.PodSucceeded {
+			// 	slog.Info("Pod has succeeded", "podName", pod.Name, "podNamespace", pod.Namespace)
+			// 	kv.Put(kvKey, []byte(corev1.PodSucceeded))
+			// 	break
+			// }
+			time.Sleep(5 * time.Second) // Poll every 5 seconds
 		}
 	}
 }

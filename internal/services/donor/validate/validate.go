@@ -7,7 +7,6 @@ import (
 	"hirocrossclusterworkloads/pkg/core/donor"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -73,7 +72,7 @@ func (v *validator) Mutate(ar admission.AdmissionReview) *admission.AdmissionRes
 			},
 		}
 	}
-	isNotEligibleToSteal := isLableExists(&pod, v.vconfig.LableToFilter)
+	isNotEligibleToSteal := common.IsLableExists(&pod, v.vconfig.LableToFilter)
 	if isNotEligibleToSteal {
 		slog.Info("Pod is not eligible to steal as it has the label", "name", pod.Name, "label", v.vconfig.LableToFilter)
 		return &admission.AdmissionResponse{Allowed: true}
@@ -86,62 +85,46 @@ func (v *validator) Mutate(ar admission.AdmissionReview) *admission.AdmissionRes
 		return nil
 	}
 
+	natsConnect, js, kv, err := v.vconfig.Nconfig.GetNATSConnectJetStreamAndKeyValue()
+	if err != nil {
+		slog.Error("Failed to connect to NATS/JS/KV", "error", err, "natsConnect", natsConnect, "js", js, "kv", kv)
+		return &admission.AdmissionResponse{Allowed: true}
+	}
+	//defer natsConnect.Close()
 	//go func() {}()
 	// Make the pod to be stolen
-	stolerUUID, err := Inform(&pod, v.vconfig)
+	kvKey := common.GenerateKVKey(v.vconfig.DonorUUID, pod.Namespace, pod.Name)
+	stolerUUID, err := Inform(&pod, v.vconfig, js, kv, kvKey)
 	if err != nil && stolerUUID == "" {
 		slog.Warn("Failed to make the pod to be stolen", "name", pod.Name, "namespace", pod.Namespace, "error", err)
 		return &admission.AdmissionResponse{Allowed: true}
 	}
 	slog.Info("Pod got stolen", "name", pod.Name, "namespace", pod.Namespace, "stealerUUID", stolerUUID)
 
+	go func() {
+		err := pollStolenPodStatus(kv, kvKey, 10)
+		if err != nil {
+			slog.Error("Failed to poll stolen pod status", "error", err)
+			//TODO: Need to create the pod again in here.
+		}
+	}()
+
 	//Mutate pod so that it won't be scheduled
 	return mutatePod(&pod, v.vconfig.DonorUUID, stolerUUID)
 }
 
-func isLableExists(pod *corev1.Pod, lable string) bool {
-	value, ok := pod.Labels[lable]
-	if !ok || strings.ToLower(value) == "false" {
-		return false
-	}
-	return true
-}
-
-func Inform(pod *corev1.Pod, vconfig donor.DVConfig) (string, error) {
-	// Connect to NATS server
-	natsConnect, err := nats.Connect(vconfig.Nconfig.NATSURL)
-	if err != nil {
-		slog.Error("Failed to connect to NATS server: ", "error", err)
-		return "", err
-	}
-	defer natsConnect.Close()
-	slog.Info("Connected to NATS server")
-
-	// Connect to JetStreams
-	js, err := vconfig.Nconfig.FetchJetStream(natsConnect)
-	if err != nil {
-		slog.Error("Failed to connect to JetStreams server: ", "error", err)
-		return "", err
-	}
-
-	jsStreamName := "Stream" + vconfig.Nconfig.NATSSubject
-	// Create a stream for message processing
-	vconfig.Nconfig.CreateJetStreamStream(js, jsStreamName)
-
-	// Create or get the KV Store for message tracking
-	kv, err := vconfig.Nconfig.CreateOrGetKeyValueStore(js, common.JetStreamBucket)
-	if err != nil {
-		slog.Error("Failed to get KeyValue: ", "error", err)
-		return "", err
-	}
-
+func Inform(pod *corev1.Pod, vconfig donor.DVConfig, js nats.JetStreamContext,
+	kv nats.KeyValue, kvKey string) (string, error) {
 	// Store "Pending" in KV Store
-	err = vconfig.Nconfig.PutKeyValue(kv, vconfig.DonorUUID, "Pending")
+	err := vconfig.Nconfig.PutKeyValue(kv, kvKey, common.DonorKVValuePending)
 	if err != nil {
-		slog.Error("Failed to put value in KV bucket: ", "error", err)
+		slog.Error("Failed to put value in KV bucket: ", "error", err,
+			"key", kvKey, "value", common.DonorKVValuePending)
+		return "", err
 	}
 
-	donorPod := donor.DonorPod{
+	donorPod := common.DonorPod{
+		KVKey:     kvKey,
 		DonorUUID: vconfig.DonorUUID,
 		Pod:       pod,
 	}
@@ -163,15 +146,15 @@ func Inform(pod *corev1.Pod, vconfig donor.DVConfig) (string, error) {
 
 	slog.Info("Published Pod metadata to JS", "subject", vconfig.Nconfig.NATSSubject, "metadata", string(metadataJSON), "donorUUID", vconfig.DonorUUID)
 
-	return WaitToGetPodStolen(vconfig.WaitToGetPodStolen, kv, vconfig)
+	return WaitToGetPodStolen(vconfig.WaitToGetPodStolen, kv, kvKey, vconfig)
 }
 
-func WaitToGetPodStolen(waitTime int, kv nats.KeyValue, vconfig donor.DVConfig) (string, error) {
+func WaitToGetPodStolen(waitTime int, kv nats.KeyValue, kvKey string, vconfig donor.DVConfig) (string, error) {
 	slog.Info(fmt.Sprintf("Waiting for %d seconds for ACK", waitTime))
 	for i := 0; i < waitTime; i++ {
 		time.Sleep(1 * time.Second) // Wait for 1 second
-		stealerUUID, err := vconfig.Nconfig.GetKeyValue(kv, vconfig.DonorUUID)
-		if err == nil && string(stealerUUID) != "Pending" {
+		stealerUUID, err := vconfig.Nconfig.GetKeyValue(kv, kvKey)
+		if err == nil && string(stealerUUID) != common.DonorKVValuePending {
 			slog.Info("Published Pod metadata was processed", "donorUUID", vconfig.DonorUUID, "stealerUUID", stealerUUID)
 			return stealerUUID, nil
 		}
@@ -257,5 +240,40 @@ func mutatePod(pod *corev1.Pod, donorUUID string, stealerUUID string) *admission
 			pt := admission.PatchTypeJSONPatch
 			return &pt
 		}(),
+	}
+}
+
+func pollStolenPodStatus(kv nats.KeyValue, kvKey string, timeoutInMin int) error {
+	// Start polling the KV store for status updates
+	pollTimeout := time.After(time.Duration(timeoutInMin) * 60 * time.Second)
+	for {
+		select {
+		case <-pollTimeout:
+			slog.Error("Polling Timeout: No response received!")
+			return fmt.Errorf("polling timeout: no response received, timeout: %d", timeoutInMin)
+		default:
+			var pollDetails common.PodPollDetails
+			statusEntry, err := kv.Get(kvKey)
+			if err != nil {
+				slog.Warn("No status found, retrying...", "err", err)
+			} else {
+				err := json.Unmarshal(statusEntry.Value(), &pollDetails)
+				if err != nil {
+					slog.Error("Failed to Unmarshal pollDetails", "error", err)
+					return err
+				}
+				var status = pollDetails.Status
+				fmt.Printf("Polled details: %s\n", status)
+
+				if status == common.PodFinishedStatus {
+					fmt.Println("Pod Processing Completed!")
+					return nil
+				} else if status == common.PodFailedStatus {
+					fmt.Println("Pod Processing Failed!")
+					return fmt.Errorf("Pod processing failed")
+				}
+			}
+			time.Sleep(5 * time.Second) // Poll every 5 seconds
+		}
 	}
 }

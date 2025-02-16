@@ -1,6 +1,9 @@
 package common
 
 import (
+	"fmt"
+	"strings"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -10,11 +13,10 @@ import (
 )
 
 var (
-	runtimeScheme      = runtime.NewScheme()
-	codecFactory       = serializer.NewCodecFactory(runtimeScheme)
-	Deserializer       = codecFactory.UniversalDeserializer()
-	JetStreamBucket    = "message_tracking"
-	JetStreamQueue     = "worker-group" //should be same for all workers/stealers
+	runtimeScheme = runtime.NewScheme()
+	codecFactory  = serializer.NewCodecFactory(runtimeScheme)
+	Deserializer  = codecFactory.UniversalDeserializer()
+	// JetStreamQueue     = "worker-group" //should be same for all workers/stealers
 	StolenPodLablesMap = map[string]string{
 		"is-pod-stolen": "true",
 		"donorUUID":     "",
@@ -23,9 +25,14 @@ var (
 	K8SNamespaces = []string{"default", "kube-system", "kube-public",
 		"kube-node-lease", "kube-admission", "kube-proxy", "kube-controller-manager",
 		"kube-scheduler", "kube-dns"}
+	DonorKVValuePending = "Pending"
+	PodFinishedStatus   = "Successful"
+	PodFailedStatus     = "Failed"
 )
 
+// Create a struct with donorUUID and pod object
 type DonorPod struct {
+	KVKey     string      `json:"kvKey"`
 	DonorUUID string      `json:"donorUUID"`
 	Pod       *corev1.Pod `json:"pod"`
 }
@@ -43,6 +50,13 @@ type Result struct {
 type PodResults struct {
 	Results Result      `json:"results"`
 	Pod     *corev1.Pod `json:"pod"`
+}
+
+type PodPollDetails struct {
+	Status    string `json:"status"`
+	Duration  string `json:"duration"`
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
 }
 
 func GetK8sClientSet() (*kubernetes.Clientset, error) {
@@ -106,4 +120,16 @@ func AreMapsEqual(map1, map2 map[string]string) bool {
 		}
 	}
 	return true
+}
+
+func IsLableExists(pod *corev1.Pod, lable string) bool {
+	value, ok := pod.Labels[lable]
+	if !ok || strings.ToLower(value) == "false" {
+		return false
+	}
+	return true
+}
+
+func GenerateKVKey(donorUUID, namespace, podName string) string {
+	return fmt.Sprintf("%s-%s-%s", donorUUID, namespace, podName)
 }

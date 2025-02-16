@@ -4,7 +4,6 @@ import (
 	natsconnect "hirocrossclusterworkloads/pkg/connector/nats"
 
 	admission "k8s.io/api/admission/v1"
-	corev1 "k8s.io/api/core/v1"
 )
 
 type DWConfig struct {
@@ -18,12 +17,6 @@ type DVConfig struct {
 	LableToFilter      string
 	IgnoreNamespaces   []string
 	WaitToGetPodStolen int
-}
-
-// Create a struct with donorUUID and pod object
-type DonorPod struct {
-	DonorUUID string      `json:"donorUUID"`
-	Pod       *corev1.Pod `json:"pod"`
 }
 
 type Validator interface {

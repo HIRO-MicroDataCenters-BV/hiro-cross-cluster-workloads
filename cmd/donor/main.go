@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"hirocrossclusterworkloads/internal/services/donor/controller"
@@ -104,6 +105,11 @@ func getENVValue(envKey string) any {
 		log.Fatal(message)
 	}
 	if valueStr != "" {
+		// Try to convert the string to an integer
+		intValue, err := strconv.Atoi(valueStr)
+		if err == nil {
+			return intValue
+		}
 		return valueStr
 	}
 	return valueInt
