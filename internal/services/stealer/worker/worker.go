@@ -253,8 +253,19 @@ func checkForAnyFailuresOrRestarts(cli *kubernetes.Clientset, pod *corev1.Pod, k
 				slog.Warn("Pod not found. It executed successfully", "podName", pod.Name, "podNamespace", pod.Namespace)
 				return nil
 			} else if err != nil {
-				slog.Error("Error retrieving Pod", "podName", pod.Name, "podNamespace", pod.Namespace, "error", err)
-				return err
+				retries := 3
+				for retries > 0 {
+					time.Sleep(2 * time.Second)
+					currentPod, err = cli.CoreV1().Pods(pod.Namespace).Get(context.TODO(), pod.Name, metav1.GetOptions{})
+					if err == nil {
+						break
+					}
+					retries--
+				}
+				if err != nil {
+					slog.Error("Error retrieving Pod", "podName", pod.Name, "podNamespace", pod.Namespace, "error", err)
+					return err
+				}
 			}
 
 			podPollDetails := common.PodPollDetails{
@@ -263,16 +274,7 @@ func checkForAnyFailuresOrRestarts(cli *kubernetes.Clientset, pod *corev1.Pod, k
 				Name:      pod.Name,
 				Namespace: pod.Namespace,
 			}
-			if currentPod.Status.Phase == corev1.PodFailed || currentPod.Status.Phase == corev1.PodUnknown {
-				slog.Error("Pod has failed", "podName", pod.Name, "podNamespace", pod.Namespace)
-				podPollDetails.Status = string(common.PodFailedStatus)
-			} else if currentPod.Status.Phase == corev1.PodSucceeded {
-				slog.Info("Pod has succeeded", "podName", pod.Name, "podNamespace", pod.Namespace)
-				podPollDetails.Status = string(common.PodFinishedStatus)
-			} else {
-				podPollDetails.Status = string(currentPod.Status.Phase)
-			}
-
+			podPollDetails.Status = string(currentPod.Status.Phase)
 			slog.Info("polling the Pod", "podPollDetails", podPollDetails)
 			podPollDetailsBytes, err := json.Marshal(podPollDetails)
 			if err != nil {
@@ -281,22 +283,14 @@ func checkForAnyFailuresOrRestarts(cli *kubernetes.Clientset, pod *corev1.Pod, k
 			}
 			kv.Put(kvKey, podPollDetailsBytes)
 
-			// if currentPod.Status.Phase == corev1.PodRunning {
-			// 	podPollDetails := common.PodPollDetails{
-			// 		Status:   string(corev1.PodRunning),
-			// 		Duration: metav1.Now().Sub(pod.Status.StartTime.Time).String(),
-			// 	}
-			// 	slog.Info("Pod is still Running", "podPollDetails", podPollDetails)
-			// 	kv.Put(kvKey, []byte(corev1.PodRunning))
-			// } else if currentPod.Status.Phase == corev1.PodFailed {
-			// 	slog.Error("Pod has failed", "podName", pod.Name, "podNamespace", pod.Namespace)
-			// 	kv.Put(kvKey, []byte(corev1.PodFailed))
-			// 	break
-			// } else if currentPod.Status.Phase == corev1.PodSucceeded {
-			// 	slog.Info("Pod has succeeded", "podName", pod.Name, "podNamespace", pod.Namespace)
-			// 	kv.Put(kvKey, []byte(corev1.PodSucceeded))
-			// 	break
-			// }
+			switch currentPod.Status.Phase {
+			case corev1.PodFailed, corev1.PodUnknown:
+				slog.Error("Pod has failed", "podName", pod.Name, "podNamespace", pod.Namespace)
+				return nil
+			case corev1.PodSucceeded:
+				slog.Info("Pod has succeeded", "podName", pod.Name, "podNamespace", pod.Namespace)
+				return nil
+			}
 			time.Sleep(5 * time.Second) // Poll every 5 seconds
 		}
 	}
