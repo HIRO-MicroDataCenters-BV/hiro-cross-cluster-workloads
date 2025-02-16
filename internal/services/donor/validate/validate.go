@@ -270,7 +270,7 @@ func pollStolenPodStatus(kv nats.KeyValue, kvKey string, timeoutInMin int) error
 					return nil
 				} else if status == common.PodFailedStatus {
 					fmt.Println("Pod Processing Failed!")
-					return fmt.Errorf("Pod processing failed")
+					return fmt.Errorf("pod processing failed")
 				}
 			}
 			time.Sleep(5 * time.Second) // Poll every 5 seconds
