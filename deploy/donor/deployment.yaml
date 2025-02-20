@@ -61,7 +61,7 @@ spec:
           - name: IGNORE_NAMESPACES
             value: "default,kube-system,local-path-storage,hiro"
           - name: WAIT_TIME_TO_GET_WORKLOAD_STOLEN_IN_MIN
-            value: "5"
+            value: "2"
           resources:
             requests:
               memory: "64Mi"

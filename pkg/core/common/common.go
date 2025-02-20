@@ -1,7 +1,6 @@
 package common
 
 import (
-	"fmt"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -130,6 +129,14 @@ func IsLableExists(pod *corev1.Pod, lable string) bool {
 	return true
 }
 
-func GenerateKVKey(donorUUID, namespace, podName string) string {
-	return fmt.Sprintf("%s-%s-%s", donorUUID, namespace, podName)
+func GenerateKVKey(input ...string) string {
+	return strings.Join(input, ".")
+}
+
+func GenerateStealWorkloadKVKey(donorUUID, namespace, podName string) string {
+	return GenerateKVKey(donorUUID, namespace, podName)
+}
+
+func GeneratePollStealWorkloadKVKey(donorUUID, namespace, podName string) string {
+	return GenerateKVKey("poll", donorUUID, namespace, podName)
 }

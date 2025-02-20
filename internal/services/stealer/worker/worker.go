@@ -103,7 +103,7 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 		}
 
 		// Mark with stealerUUID in KV by this stealer
-		_, err = kv.Put(kvKey, []byte(stealerUUID))
+		_, err = kv.Update(kvKey, []byte(stealerUUID), entry.Revision())
 		if err != nil && !errors.Is(err, nats.ErrKeyExists) {
 			slog.Error("Failed to put value in KV bucket: ", "error", err)
 			msg.Nak()
@@ -114,6 +114,7 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 			slog.Error("Failed to steal Pod", "error", err)
 			msg.Nak()
 		}
+		slog.Info("Successfully stole the Pod", "pod", createdPod)
 
 		// Acknowledge JetStream message
 		msg.Ack()
@@ -269,19 +270,27 @@ func checkForAnyFailuresOrRestarts(cli *kubernetes.Clientset, pod *corev1.Pod, k
 			}
 
 			podPollDetails := common.PodPollDetails{
-				//Status:    string(currentPod.Status.Phase),
-				Duration:  metav1.Now().Sub(pod.Status.StartTime.Time).String(),
+				Status: string(currentPod.Status.Phase),
+				Duration: func() string {
+					if pod.Status.StartTime != nil {
+						return metav1.Now().Sub(pod.Status.StartTime.Time).String()
+					}
+					return "unknown"
+				}(),
 				Name:      pod.Name,
 				Namespace: pod.Namespace,
 			}
-			podPollDetails.Status = string(currentPod.Status.Phase)
 			slog.Info("polling the Pod", "podPollDetails", podPollDetails)
 			podPollDetailsBytes, err := json.Marshal(podPollDetails)
 			if err != nil {
 				slog.Error("Failed to marshal podPollDetails", "error", err)
 				return err
 			}
-			kv.Put(kvKey, podPollDetailsBytes)
+			_, err = kv.Create(kvKey, podPollDetailsBytes)
+			if err != nil {
+				slog.Error("Failed to create KV entry", "error", err, "kvKey", kvKey)
+				return nil
+			}
 
 			switch currentPod.Status.Phase {
 			case corev1.PodFailed, corev1.PodUnknown:
