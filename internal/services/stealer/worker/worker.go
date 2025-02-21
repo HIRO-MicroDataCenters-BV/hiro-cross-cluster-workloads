@@ -56,6 +56,7 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 		var donorPod common.DonorPod
 		var donorUUID string
 		var kvKey string
+		var waitTime int
 		var stealerUUID = c.Config.StealerUUID
 		slog.Info("Received message", "subject", c.Config.Nclient.NATSSubject, "data", string(msg.Data))
 
@@ -84,7 +85,8 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 		}
 		donorUUID = donorPod.DonorUUID
 		kvKey = donorPod.KVKey
-		slog.Info("Deserialized", "donorUUID", donorUUID, "kvKey", kvKey)
+		waitTime = donorPod.WaitTime
+		slog.Info("Deserialized", "donorUUID", donorUUID, "kvKey", kvKey, "waitTime", waitTime)
 
 		// Check if message is already processed
 		entry, err := kv.Get(kvKey)
@@ -121,7 +123,8 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 
 		// Watch the created pod for every 5 sec and send it status to donor
 		go func() {
-			checkForAnyFailuresOrRestarts(c.Cli, createdPod, kv, kvKey, 10)
+			pollKVKey := common.GeneratePollStealWorkloadKVKey(donorUUID, stealerUUID, pod.Namespace, pod.Name)
+			checkForAnyFailuresOrRestarts(c.Cli, createdPod, kv, pollKVKey, waitTime)
 		}()
 
 	})
@@ -239,17 +242,17 @@ func isPodSuccesfullyRunning(clientset *kubernetes.Clientset, namespace, name st
 	}
 }
 
-func checkForAnyFailuresOrRestarts(cli *kubernetes.Clientset, pod *corev1.Pod, kv nats.KeyValue, kvKey string, timeoutInMin int) error {
+func checkForAnyFailuresOrRestarts(cli *kubernetes.Clientset, pod *corev1.Pod, kv nats.KeyValue, pollKVKey string, timeoutInMin int) error {
 	// Start polling the KV store for status updates
 	pollTimeout := time.After(time.Duration(timeoutInMin) * 60 * time.Second)
 	for {
 		select {
 		case <-pollTimeout:
-			slog.Error("Polling Timeout: No response received!")
-			return fmt.Errorf("polling timeout: no response received, timeout: %d", timeoutInMin)
+			slog.Error("Polling Timeout: No response sent!", "timeoutInMin", timeoutInMin)
+			return fmt.Errorf("polling timeout: no response sent, timeoutInMin: %d", timeoutInMin)
 		default:
 			currentPod, err := cli.CoreV1().Pods(pod.Namespace).Get(context.TODO(), pod.Name, metav1.GetOptions{})
-			entry, getErr := kv.Get(kvKey)
+			entry, getErr := kv.Get(pollKVKey)
 			if apierrors.IsNotFound(err) && (getErr == nil && string(entry.Value()) == string(corev1.PodSucceeded)) {
 				slog.Warn("Pod not found. It executed successfully", "podName", pod.Name, "podNamespace", pod.Namespace)
 				return nil
@@ -270,15 +273,10 @@ func checkForAnyFailuresOrRestarts(cli *kubernetes.Clientset, pod *corev1.Pod, k
 			}
 
 			podPollDetails := common.PodPollDetails{
-				Status: string(currentPod.Status.Phase),
-				Duration: func() string {
-					if pod.Status.StartTime != nil {
-						return metav1.Now().Sub(pod.Status.StartTime.Time).String()
-					}
-					return "unknown"
-				}(),
-				Name:      pod.Name,
-				Namespace: pod.Namespace,
+				Status:    string(currentPod.Status.Phase),
+				Duration:  metav1.Now().Sub(currentPod.Status.StartTime.Time).String(),
+				Name:      currentPod.Name,
+				Namespace: currentPod.Namespace,
 			}
 			slog.Info("polling the Pod", "podPollDetails", podPollDetails)
 			podPollDetailsBytes, err := json.Marshal(podPollDetails)
@@ -286,9 +284,10 @@ func checkForAnyFailuresOrRestarts(cli *kubernetes.Clientset, pod *corev1.Pod, k
 				slog.Error("Failed to marshal podPollDetails", "error", err)
 				return err
 			}
-			_, err = kv.Create(kvKey, podPollDetailsBytes)
+
+			_, err = kv.Put(pollKVKey, podPollDetailsBytes)
 			if err != nil {
-				slog.Error("Failed to create KV entry", "error", err, "kvKey", kvKey)
+				slog.Error("Failed to put KV entry", "error", err, "kvKey", pollKVKey)
 				return nil
 			}
 

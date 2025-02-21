@@ -1,6 +1,7 @@
 package validate
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"hirocrossclusterworkloads/pkg/core/common"
@@ -28,6 +29,7 @@ var (
 	mutatePodLablesMap = map[string]string{
 		"is-pod-stolen": "true",
 	}
+	pollWaitTimeInMin = 10 // This has to be decide from some intelligence (like how long it takes to process the pod)
 )
 
 type validator struct {
@@ -72,6 +74,13 @@ func (v *validator) Mutate(ar admission.AdmissionReview) *admission.AdmissionRes
 			},
 		}
 	}
+
+	// Check if the pod has already been processed
+	_, exists := pod.Labels[common.StolenPodFailedLable]
+	if exists {
+		slog.Info("Pod has already been processed", "name", pod.Name, "namespace", pod.Namespace)
+		return &admission.AdmissionResponse{Allowed: true}
+	}
 	isNotEligibleToSteal := common.IsLableExists(&pod, v.vconfig.LableToFilter)
 	if isNotEligibleToSteal {
 		slog.Info("Pod is not eligible to steal as it has the label", "name", pod.Name, "label", v.vconfig.LableToFilter)
@@ -94,24 +103,33 @@ func (v *validator) Mutate(ar admission.AdmissionReview) *admission.AdmissionRes
 	//go func() {}()
 	// Make the pod to be stolen
 	kvKey := common.GenerateStealWorkloadKVKey(v.vconfig.DonorUUID, pod.Namespace, pod.Name)
-	stolerUUID, err := Inform(&pod, v.vconfig, js, kv, kvKey)
-	if err != nil && stolerUUID == "" {
+	stealerUUID, err := Inform(&pod, v.vconfig, js, kv, kvKey)
+	if err != nil && stealerUUID == "" {
 		slog.Warn("Failed to make the pod to be stolen", "name", pod.Name, "namespace", pod.Namespace, "error", err)
 		return &admission.AdmissionResponse{Allowed: true}
 	}
-	slog.Info("Pod got stolen", "name", pod.Name, "namespace", pod.Namespace, "stealerUUID", stolerUUID)
+	slog.Info("Pod got stolen", "name", pod.Name, "namespace", pod.Namespace, "stealerUUID", stealerUUID)
 
 	go func() {
-		pollKVKey := common.GeneratePollStealWorkloadKVKey(v.vconfig.DonorUUID, pod.Namespace, pod.Name)
-		err := pollStolenPodStatus(kv, pollKVKey, 10)
+		pollKVKey := common.GeneratePollStealWorkloadKVKey(v.vconfig.DonorUUID, stealerUUID, pod.Namespace, pod.Name)
+		err := pollStolenPodStatus(kv, pollKVKey, pollWaitTimeInMin)
 		if err != nil {
 			slog.Error("Failed to poll stolen pod status", "error", err)
-			//TODO: Need to create the pod again in here.
+
+			// Create the pod again by adding a label
+			pod.Labels[common.StolenPodFailedLable] = "true"
+			slog.Info("Creating the pod here itself", "name", pod.Name, "namespace", pod.Namespace)
+			_, createErr := v.cli.CoreV1().Pods(pod.Namespace).Create(context.TODO(), &pod, metav1.CreateOptions{})
+			if createErr != nil {
+				slog.Error("Failed to create pod", "error", createErr)
+			} else {
+				slog.Info("Successfully created pod", "name", pod.Name, "namespace", pod.Namespace)
+			}
 		}
 	}()
 
 	//Mutate pod so that it won't be scheduled
-	return mutatePod(&pod, v.vconfig.DonorUUID, stolerUUID)
+	return mutatePod(&pod, v.vconfig.DonorUUID, stealerUUID)
 }
 
 func Inform(pod *corev1.Pod, vconfig donor.DVConfig, js nats.JetStreamContext,
@@ -128,6 +146,7 @@ func Inform(pod *corev1.Pod, vconfig donor.DVConfig, js nats.JetStreamContext,
 		KVKey:     kvKey,
 		DonorUUID: vconfig.DonorUUID,
 		Pod:       pod,
+		WaitTime:  10,
 	}
 	slog.Info("Created donorPod structure", "struct", donorPod)
 
@@ -248,61 +267,36 @@ func mutatePod(pod *corev1.Pod, donorUUID string, stealerUUID string) *admission
 func pollStolenPodStatus(kv nats.KeyValue, pollKVKey string, timeoutInMin int) error {
 	// Start polling the KV store for status updates
 	pollTimeout := time.After(time.Duration(timeoutInMin) * 60 * time.Second)
+	var pollDetails *common.PodPollDetails
+	watcher, err := kv.Watch(pollKVKey)
+	if err != nil {
+		slog.Error("Failed to start watcher", "error", err)
+		return err
+	}
 	for {
 		select {
 		case <-pollTimeout:
 			slog.Error("Polling Timeout: No response received!")
 			return fmt.Errorf("polling timeout: no response received, timeout: %d", timeoutInMin)
-		default:
-			var pollDetails *common.PodPollDetails
-			watcher, err := kv.Watch(pollKVKey)
+		case update := <-watcher.Updates():
+			if update == nil {
+				continue
+			}
+			value := update.Value()
+			err := json.Unmarshal(value, &pollDetails)
 			if err != nil {
-				slog.Error("Failed to start watcher", "error", err)
+				slog.Error("Failed to Unmarshal pollDetails", "error", err, "value", string(value))
 				return err
 			}
-			for update := range watcher.Updates() {
-				if update == nil {
-					continue
-				}
-				value := update.Value()
-				err := json.Unmarshal(value, &pollDetails)
-				if err != nil {
-					slog.Error("Failed to Unmarshal pollDetails", "error", err, "value", string(value))
-					return err
-				}
-				slog.Info("Pod Poll details", "pollDetails", pollDetails)
+			slog.Info("Pod Poll details", "pollDetails", pollDetails)
 
-				if pollDetails.Status == common.PodFinishedStatus {
-					fmt.Println("Pod Processing Completed!")
-					return nil
-				} else if pollDetails.Status == common.PodFailedStatus {
-					fmt.Println("Pod Processing Failed!")
-					return fmt.Errorf("pod processing failed")
-				}
+			if pollDetails.Status == common.PodFinishedStatus {
+				fmt.Println("Pod Processing Completed!")
+				return nil
+			} else if pollDetails.Status == common.PodFailedStatus {
+				fmt.Println("Pod Processing Failed!")
+				return fmt.Errorf("pod processing failed")
 			}
-			// pollDetailsEntry, err := kv.Get(pollKVKey)
-			// if err != nil {
-			// 	slog.Warn("No status found, retrying...", "err", err)
-			// } else {
-			// 	value := pollDetailsEntry.Value()
-			// 	slog.Info("Polling KV Entry Value", "value", string(value))
-			// 	err := json.Unmarshal(value, &pollDetails)
-			// 	if err != nil {
-			// 		slog.Error("Failed to Unmarshal pollDetails", "error", err, "value", string(value))
-			// 		return err
-			// 	}
-			// 	var status = pollDetails.Status
-			// 	fmt.Printf("Pod Poll details: %s\n", status)
-
-			// 	if status == common.PodFinishedStatus {
-			// 		fmt.Println("Pod Processing Completed!")
-			// 		return nil
-			// 	} else if status == common.PodFailedStatus {
-			// 		fmt.Println("Pod Processing Failed!")
-			// 		return fmt.Errorf("pod processing failed")
-			// 	}
-			// }
-			// time.Sleep(5 * time.Second) // Poll every 5 seconds
 		}
 	}
 }

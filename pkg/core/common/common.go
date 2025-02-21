@@ -21,7 +21,8 @@ var (
 		"donorUUID":     "",
 		"stealerUUID":   "",
 	}
-	K8SNamespaces = []string{"default", "kube-system", "kube-public",
+	StolenPodFailedLable = "StealFailed"
+	K8SNamespaces        = []string{"default", "kube-system", "kube-public",
 		"kube-node-lease", "kube-admission", "kube-proxy", "kube-controller-manager",
 		"kube-scheduler", "kube-dns"}
 	DonorKVValuePending = "Pending"
@@ -34,6 +35,7 @@ type DonorPod struct {
 	KVKey     string      `json:"kvKey"`
 	DonorUUID string      `json:"donorUUID"`
 	Pod       *corev1.Pod `json:"pod"`
+	WaitTime  int         `json:"waitTime"`
 }
 
 type Result struct {
@@ -137,6 +139,6 @@ func GenerateStealWorkloadKVKey(donorUUID, namespace, podName string) string {
 	return GenerateKVKey(donorUUID, namespace, podName)
 }
 
-func GeneratePollStealWorkloadKVKey(donorUUID, namespace, podName string) string {
-	return GenerateKVKey("poll", donorUUID, namespace, podName)
+func GeneratePollStealWorkloadKVKey(donorUUID, stealerUUID, namespace, podName string) string {
+	return GenerateKVKey(donorUUID, stealerUUID, namespace, podName)
 }
