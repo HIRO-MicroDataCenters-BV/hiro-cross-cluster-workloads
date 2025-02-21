@@ -7,6 +7,7 @@ import (
 
 	"hirocrossclusterworkloads/pkg/core/common"
 	"hirocrossclusterworkloads/pkg/core/donor"
+	"hirocrossclusterworkloads/pkg/metrics"
 
 	nats "github.com/nats-io/nats.go"
 	corev1 "k8s.io/api/core/v1"
@@ -88,6 +89,7 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 			return
 		}
 
+		metrics.DonorResultsReceivedTotal.WithLabelValues(c.Config.DonorUUID).Inc()
 		// Delete the pending Pod here
 		err = c.Cli.CoreV1().Pods(pod.Namespace).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{})
 		if err != nil {

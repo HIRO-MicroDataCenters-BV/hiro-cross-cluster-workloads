@@ -62,6 +62,10 @@ spec:
             value: "default,kube-system,local-path-storage,hiro"
           - name: WAIT_TIME_TO_GET_WORKLOAD_STOLEN_IN_MIN
             value: "2"
+          - name: METRICS_PORT
+            value: "2112"
+          - name: METRICS_PATH
+            value: "donor_metrics"
           resources:
             requests:
               memory: "64Mi"

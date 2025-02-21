@@ -7,6 +7,7 @@ import (
 
 	"hirocrossclusterworkloads/pkg/core/common"
 	"hirocrossclusterworkloads/pkg/core/stealer"
+	"hirocrossclusterworkloads/pkg/metrics"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -79,6 +80,8 @@ func (n *notify) Start(stopChan chan<- bool) error {
 				"namespace", pod.Namespace, "name", pod.Name, "labels", pod.Labels)
 
 			podResults := n.generatePodResults(pod)
+			completionTime := podResults.Results.CompletionTime.Time.Second()
+			metrics.StealerProcessingDuration.WithLabelValues(n.config.StealerUUID).Observe(float64(completionTime))
 			// Serialize the entire PodResults to JSON
 			metadataJSON, err := json.Marshal(podResults)
 			if err != nil {

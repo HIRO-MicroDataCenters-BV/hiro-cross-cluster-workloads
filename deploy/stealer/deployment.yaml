@@ -60,6 +60,10 @@ spec:
             value: "WorkLoadSteal"  
           - name: IGNORE_NAMESPACES
             value: "default,kube-system,local-path-storage,hiro"
+          - name: METRICS_PORT
+            value: "2113"  
+          - name: METRICS_PATH
+            value: "stealer_metrics"  
           resources:
             requests:
               memory: "64Mi"

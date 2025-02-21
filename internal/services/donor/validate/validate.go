@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hirocrossclusterworkloads/pkg/core/common"
 	"hirocrossclusterworkloads/pkg/core/donor"
+	"hirocrossclusterworkloads/pkg/metrics"
 	"log/slog"
 	"net/http"
 	"time"
@@ -163,8 +164,8 @@ func Inform(pod *corev1.Pod, vconfig donor.DVConfig, js nats.JetStreamContext,
 		slog.Error("Failed to publish pod metadata to JS", "error", err, "subject", vconfig.Nconfig.NATSSubject, "donorUUID", vconfig.DonorUUID)
 		return "", err
 	}
-
 	slog.Info("Published Pod metadata to JS", "subject", vconfig.Nconfig.NATSSubject, "metadata", string(metadataJSON), "donorUUID", vconfig.DonorUUID)
+	metrics.DonorPublishedTasksTotal.WithLabelValues(vconfig.DonorUUID).Inc()
 
 	return WaitToGetPodStolen(vconfig.WaitToGetPodStolen, kv, kvKey, vconfig)
 }

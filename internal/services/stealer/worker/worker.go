@@ -10,6 +10,7 @@ import (
 
 	"hirocrossclusterworkloads/pkg/core/common"
 	"hirocrossclusterworkloads/pkg/core/stealer"
+	"hirocrossclusterworkloads/pkg/metrics"
 
 	nats "github.com/nats-io/nats.go"
 	corev1 "k8s.io/api/core/v1"
@@ -117,6 +118,8 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 			msg.Nak()
 		}
 		slog.Info("Successfully stole the Pod", "pod", createdPod)
+		metrics.StealerClaimedTasksTotal.WithLabelValues(stealerUUID).Inc()
+		metrics.StolenTasksTotal.WithLabelValues(donorUUID, stealerUUID).Inc()
 
 		// Acknowledge JetStream message
 		msg.Ack()

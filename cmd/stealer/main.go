@@ -11,6 +11,7 @@ import (
 	"hirocrossclusterworkloads/internal/services/stealer/worker"
 	natsconnect "hirocrossclusterworkloads/pkg/connector/nats"
 	"hirocrossclusterworkloads/pkg/core/stealer"
+	"hirocrossclusterworkloads/pkg/metrics"
 
 	"github.com/google/uuid"
 	"github.com/spf13/viper"
@@ -18,6 +19,11 @@ import (
 
 func main() {
 	stopChan := make(chan bool)
+
+	// Start Prometheus metrics server
+	mPath := ":" + getENVValue("METRICS_PATH").(string)
+	mPort := "/" + getENVValue("METRICS_PORT").(string)
+	metrics.StartStealerMetricsServer(mPath, mPort)
 
 	// To Do: Every restrat of the worker will have a new UUID.
 	// This logic has to be changed so that the UUID will never change.

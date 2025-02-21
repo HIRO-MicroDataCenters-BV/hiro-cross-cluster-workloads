@@ -13,6 +13,7 @@ import (
 	"hirocrossclusterworkloads/internal/services/donor/worker"
 	natsconnect "hirocrossclusterworkloads/pkg/connector/nats"
 	"hirocrossclusterworkloads/pkg/core/donor"
+	"hirocrossclusterworkloads/pkg/metrics"
 
 	"github.com/google/uuid"
 	"github.com/spf13/viper"
@@ -25,6 +26,11 @@ var (
 
 func main() {
 	stopChan := make(chan bool)
+
+	// Start Prometheus metrics server
+	mPath := ":" + getENVValue("METRICS_PATH").(string)
+	mPort := "/" + getENVValue("METRICS_PORT").(string)
+	metrics.StartDonorMetricsServer(mPath, mPort)
 
 	// To Do: Every restrat of the donor will have a new UUID.
 	// This logic has to be changed so that the UUID is persisted.
