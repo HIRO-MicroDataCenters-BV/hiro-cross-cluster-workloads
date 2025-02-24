@@ -9,3 +9,20 @@ spec:
   ports:
     - port: 443
       targetPort: 8443
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: workload-donor-monitor-service
+  namespace: hiro
+  labels:
+    app: workload-donor
+spec:
+  type: NodePort
+  selector:
+    app: workload-donor
+  ports:
+    - protocol: TCP
+      port: 9092
+      targetPort: 9092
+      nodePort: 30092  # Exposed on host machine

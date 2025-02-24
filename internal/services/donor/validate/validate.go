@@ -277,8 +277,8 @@ func pollStolenPodStatus(kv nats.KeyValue, pollKVKey string, timeoutInMin int) e
 	for {
 		select {
 		case <-pollTimeout:
-			slog.Error("Polling Timeout: No response received!")
-			return fmt.Errorf("polling timeout: no response received, timeout: %d", timeoutInMin)
+			slog.Error("Polling Timeout!", "timeout", timeoutInMin)
+			return fmt.Errorf("polling timeout, timeout: %d", timeoutInMin)
 		case update := <-watcher.Updates():
 			if update == nil {
 				continue

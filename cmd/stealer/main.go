@@ -21,8 +21,8 @@ func main() {
 	stopChan := make(chan bool)
 
 	// Start Prometheus metrics server
-	mPath := ":" + getENVValue("METRICS_PATH").(string)
-	mPort := "/" + getENVValue("METRICS_PORT").(string)
+	mPath := "/" + getENVValue("METRICS_PATH").(string)
+	mPort := ":" + strconv.Itoa(getENVValue("METRICS_PORT").(int))
 	metrics.StartStealerMetricsServer(mPath, mPort)
 
 	// To Do: Every restrat of the worker will have a new UUID.

@@ -256,9 +256,14 @@ func checkForAnyFailuresOrRestarts(cli *kubernetes.Clientset, pod *corev1.Pod, k
 		default:
 			currentPod, err := cli.CoreV1().Pods(pod.Namespace).Get(context.TODO(), pod.Name, metav1.GetOptions{})
 			entry, getErr := kv.Get(pollKVKey)
-			if apierrors.IsNotFound(err) && (getErr == nil && string(entry.Value()) == string(corev1.PodSucceeded)) {
-				slog.Warn("Pod not found. It executed successfully", "podName", pod.Name, "podNamespace", pod.Namespace)
-				return nil
+			if apierrors.IsNotFound(err) {
+				if getErr == nil && string(entry.Value()) == string(corev1.PodSucceeded) {
+					slog.Warn("Pod not found. It executed successfully", "podName", pod.Name, "podNamespace", pod.Namespace)
+					return nil
+				} else {
+					slog.Error("Pod not found", "podName", pod.Name, "podNamespace", pod.Namespace)
+					return err
+				}
 			} else if err != nil {
 				retries := 3
 				for retries > 0 {

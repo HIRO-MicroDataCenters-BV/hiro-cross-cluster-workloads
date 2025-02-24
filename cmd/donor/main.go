@@ -28,8 +28,8 @@ func main() {
 	stopChan := make(chan bool)
 
 	// Start Prometheus metrics server
-	mPath := ":" + getENVValue("METRICS_PATH").(string)
-	mPort := "/" + getENVValue("METRICS_PORT").(string)
+	mPath := "/" + getENVValue("METRICS_PATH").(string)
+	mPort := ":" + strconv.Itoa(getENVValue("METRICS_PORT").(int))
 	metrics.StartDonorMetricsServer(mPath, mPort)
 
 	// To Do: Every restrat of the donor will have a new UUID.

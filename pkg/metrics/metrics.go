@@ -61,15 +61,28 @@ func RegisterStealerMetrics() {
 	prometheus.MustRegister(StolenTasksTotal, StealerClaimedTasksTotal, StealerProcessingDuration)
 }
 
-// StartMetricsServer starts an HTTP server for Prometheus metrics
+// StartDonorMetricsServer starts an HTTP server for Prometheus metrics
 func StartDonorMetricsServer(mPath string, mPort string) {
 	RegisterDonorMetrics()
-	http.Handle(mPath, promhttp.HandlerFor(prometheus.DefaultGatherer, promhttp.HandlerOpts{}))
+	if mPath[0] != '/' {
+		mPath = "/" + mPath
+	}
+	if mPort[0] != ':' {
+		mPort = ":" + mPath
+	}
+	http.Handle(mPath, promhttp.Handler())
 	go http.ListenAndServe(mPort, nil)
 }
 
+// StartStealerMetricsServer starts an HTTP server for Prometheus metrics
 func StartStealerMetricsServer(mPath string, mPort string) {
 	RegisterStealerMetrics()
-	http.Handle(mPath, promhttp.HandlerFor(prometheus.DefaultGatherer, promhttp.HandlerOpts{}))
+	if mPath[0] != '/' {
+		mPath = "/" + mPath
+	}
+	if mPort[0] != ':' {
+		mPort = ":" + mPath
+	}
+	http.Handle(mPath, promhttp.Handler())
 	go http.ListenAndServe(mPort, nil)
 }

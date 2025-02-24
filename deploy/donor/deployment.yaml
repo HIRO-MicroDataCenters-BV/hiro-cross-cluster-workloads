@@ -63,7 +63,7 @@ spec:
           - name: WAIT_TIME_TO_GET_WORKLOAD_STOLEN_IN_MIN
             value: "2"
           - name: METRICS_PORT
-            value: "2112"
+            value: "9092"
           - name: METRICS_PATH
             value: "donor_metrics"
           resources:
@@ -75,6 +75,7 @@ spec:
               cpu: "500m"
           ports:
             - containerPort: 8443
+            - containerPort: 9092
           volumeMounts:
             - name: tls-certs
               mountPath: /etc/certs
