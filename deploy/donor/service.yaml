@@ -9,6 +9,7 @@ spec:
   ports:
     - port: 443
       targetPort: 8443
+      name: mutaionwebhook
 ---
 apiVersion: v1
 kind: Service
@@ -26,3 +27,4 @@ spec:
       port: 9092
       targetPort: 9092
       nodePort: 30092  # Exposed on host machine
+      name: metrics

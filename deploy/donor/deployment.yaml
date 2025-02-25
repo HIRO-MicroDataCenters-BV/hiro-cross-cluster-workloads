@@ -75,7 +75,9 @@ spec:
               cpu: "500m"
           ports:
             - containerPort: 8443
+              name: mutaionwebhook
             - containerPort: 9092
+              name: metrics
           volumeMounts:
             - name: tls-certs
               mountPath: /etc/certs

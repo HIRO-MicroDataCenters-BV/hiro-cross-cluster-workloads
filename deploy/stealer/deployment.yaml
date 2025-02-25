@@ -73,6 +73,7 @@ spec:
               cpu: "500m"
           ports:
             - containerPort: 9091
+              name: metrics
 ---
 apiVersion: v1
 kind: Service
@@ -90,4 +91,5 @@ spec:
       port: 9091
       targetPort: 9091
       nodePort: 30091  # Exposed on host machine
+      name: metrics
           
