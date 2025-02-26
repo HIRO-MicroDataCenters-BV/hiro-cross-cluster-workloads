@@ -267,6 +267,12 @@ func mutatePod(pod *corev1.Pod, donorUUID string, stealerUUID string) *admission
 
 func pollStolenPodStatus(kv nats.KeyValue, pollKVKey string, timeoutInMin int) error {
 	// Start polling the KV store for status updates
+	defer func() {
+		err := kv.Delete(pollKVKey)
+		if err != nil && err != nats.ErrKeyNotFound {
+			slog.Error("Failed to delete key from KV store", "error", err, "key", pollKVKey)
+		}
+	}()
 	pollTimeout := time.After(time.Duration(timeoutInMin) * 60 * time.Second)
 	var pollDetails *common.PodPollDetails
 	watcher, err := kv.Watch(pollKVKey)

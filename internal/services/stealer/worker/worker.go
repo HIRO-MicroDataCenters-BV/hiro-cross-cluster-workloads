@@ -247,6 +247,12 @@ func isPodSuccesfullyRunning(clientset *kubernetes.Clientset, namespace, name st
 
 func checkForAnyFailuresOrRestarts(cli *kubernetes.Clientset, pod *corev1.Pod, kv nats.KeyValue, pollKVKey string, timeoutInMin int) error {
 	// Start polling the KV store for status updates
+	defer func() {
+		err := kv.Delete(pollKVKey)
+		if err != nil && err != nats.ErrKeyNotFound {
+			slog.Error("Failed to delete key from KV store", "error", err, "key", pollKVKey)
+		}
+	}()
 	pollTimeout := time.After(time.Duration(timeoutInMin) * 60 * time.Second)
 	for {
 		select {

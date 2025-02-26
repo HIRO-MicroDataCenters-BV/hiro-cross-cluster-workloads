@@ -29,3 +29,6 @@ certs/
 ./subj.txt
 workloaddonor
 workloadstealer
+broker-info-decoded.subm
+broker-info.subm
+broker-info.*

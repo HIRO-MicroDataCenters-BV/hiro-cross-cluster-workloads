@@ -10,6 +10,15 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# Install submariner
+./scripts/stealer/submariner.sh $CLUSTER_NAME
+
+# Check if the submariner script ran successfully
+if [ $? -ne 0 ]; then
+    echo "Submariner installation failed. Exiting."
+    exit 1
+fi
+
 # Run the install script
 ./scripts/stealer/install.sh $CLUSTER_NAME
 
@@ -19,4 +28,4 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-echo "Both scripts ran successfully."
+echo "All scripts ran successfully."

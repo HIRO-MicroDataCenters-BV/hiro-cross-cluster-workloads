@@ -15,4 +15,4 @@ echo "Create 'hiro' namespace if it doesn't exist"
 kubectl get namespace | grep -q "hiro" || kubectl create namespace hiro
 
 echo "Deploying Worker Server"
-kubectl apply -f deploy/stealer/deployment.yaml
+kubectl apply -f deploy/stealer/deployment.yaml --context kind-$CLUSTER_NAME
