@@ -21,7 +21,7 @@ var (
 		"donorUUID":     "",
 		"stealerUUID":   "",
 	}
-	StolenPodFailedLable = "StealFailed"
+	StolenPodFailedLable = "StolenOneFailed"
 	K8SNamespaces        = []string{"default", "kube-system", "kube-public",
 		"kube-node-lease", "kube-admission", "kube-proxy", "kube-controller-manager",
 		"kube-scheduler", "kube-dns"}
@@ -30,12 +30,20 @@ var (
 	PodFailedStatus     = "Failed"
 )
 
-// Create a struct with donorUUID and pod object
+type DonorDetails struct {
+	DonorUUID string `json:"donorUUID"`
+	KVKey     string `json:"kvKey"`
+	WaitTime  int    `json:"waitTime"`
+}
+
 type DonorPod struct {
-	KVKey     string      `json:"kvKey"`
-	DonorUUID string      `json:"donorUUID"`
-	Pod       *corev1.Pod `json:"pod"`
-	WaitTime  int         `json:"waitTime"`
+	DonorDetails DonorDetails `json:"donorDetails"`
+	Pod          *corev1.Pod  `json:"pod"`
+}
+
+type DonorService struct {
+	DonorDetails DonorDetails    `json:"donorDetails"`
+	Service      *corev1.Service `json:"service"`
 }
 
 type Result struct {
@@ -60,17 +68,17 @@ type PodPollDetails struct {
 	Namespace string `json:"namespace"`
 }
 
-func GetK8sClientSet() (*kubernetes.Clientset, error) {
+func GetK8sClientAndConfigSet() (*kubernetes.Clientset, *rest.Config, error) {
 	config, err := rest.InClusterConfig()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return clientset, err
+	return clientset, config, err
 }
 
 func MergeMaps(map1, map2 map[string]string) map[string]string {
@@ -123,8 +131,16 @@ func AreMapsEqual(map1, map2 map[string]string) bool {
 	return true
 }
 
-func IsLableExists(pod *corev1.Pod, lable string) bool {
+func IsPodLableExists(pod *corev1.Pod, lable string) bool {
 	value, ok := pod.Labels[lable]
+	if !ok || strings.ToLower(value) == "false" {
+		return false
+	}
+	return true
+}
+
+func IsServiceLableExists(svc *corev1.Service, lable string) bool {
+	value, ok := svc.Labels[lable]
 	if !ok || strings.ToLower(value) == "false" {
 		return false
 	}

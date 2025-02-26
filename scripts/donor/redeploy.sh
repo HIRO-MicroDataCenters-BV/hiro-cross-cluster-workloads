@@ -12,4 +12,5 @@ echo "Load Image to Kind cluster named '$CLUSTER_NAME'"
 kind load docker-image --name $CLUSTER_NAME workloaddonor:alpha1
 
 echo "Restarting Agent Deployment"
-kubectl rollout restart deployment workload-donor -n hiro
+kubectl apply -f deploy/donor/deployment.yaml --context kind-$CLUSTER_NAME
+kubectl rollout restart deployment workload-donor -n hiro --context kind-$CLUSTER_NAME

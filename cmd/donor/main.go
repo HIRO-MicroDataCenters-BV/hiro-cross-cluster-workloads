@@ -9,8 +9,8 @@ import (
 	"strings"
 
 	"hirocrossclusterworkloads/internal/services/donor/controller"
+	results "hirocrossclusterworkloads/internal/services/donor/results"
 	"hirocrossclusterworkloads/internal/services/donor/validate"
-	"hirocrossclusterworkloads/internal/services/donor/worker"
 	natsconnect "hirocrossclusterworkloads/pkg/connector/nats"
 	"hirocrossclusterworkloads/pkg/core/donor"
 	"hirocrossclusterworkloads/pkg/metrics"
@@ -72,7 +72,7 @@ func main() {
 		Nclient:   workerNATSConfig,
 		DonorUUID: donorUUID,
 	}
-	consumer, err := worker.New(workerConfig)
+	consumer, err := results.New(workerConfig)
 	if err != nil {
 		log.Fatal(err)
 	}

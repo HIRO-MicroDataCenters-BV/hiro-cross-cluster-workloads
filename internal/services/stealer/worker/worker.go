@@ -16,50 +16,54 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 type Consume struct {
-	Config stealer.SWConfig
-	Cli    *kubernetes.Clientset
+	StealerConfig stealer.SWConfig
+	K8SCli        *kubernetes.Clientset
+	K8SConfig     *rest.Config
 }
 
-func New(config stealer.SWConfig) (stealer.Stealer, error) {
-	clientset, err := common.GetK8sClientSet()
+func New(stealerConfig stealer.SWConfig) (stealer.Stealer, error) {
+	clientset, config, err := common.GetK8sClientAndConfigSet()
 	if err != nil {
 		return nil, err
 	}
 	//Consume implements Stealer interface
 	return &Consume{
-		Cli:    clientset,
-		Config: config,
+		K8SCli:        clientset,
+		StealerConfig: stealerConfig,
+		K8SConfig:     config,
 	}, nil
 }
 
 func (c *Consume) Start(stopChan chan<- bool) error {
 	defer func() { stopChan <- true }()
 
-	natsConnect, js, kv, err := c.Config.Nclient.GetNATSConnectJetStreamAndKeyValue()
+	natsConnect, js, kv, err := c.StealerConfig.Nclient.GetNATSConnectJetStreamAndKeyValue()
 	if err != nil {
 		slog.Error("Failed to connect to NATS/JS/KV", "error", err, "natsConnect", natsConnect, "js", js, "kv", kv)
 		return err
 	}
 	defer natsConnect.Close()
 
-	jetStreamName := c.Config.Nclient.GetJetStreamName()
-	jetStreamQueue := c.Config.Nclient.GetJetStreamQueueName()
+	jetStreamName := c.StealerConfig.Nclient.GetJetStreamName()
+	jetStreamQueue := c.StealerConfig.Nclient.GetJetStreamQueueName()
 	slog.Info("Subscribe to Pod stealing messages...", "stream", jetStreamName,
-		"queue", jetStreamQueue, "subject", c.Config.Nclient.NATSSubject)
+		"queue", jetStreamQueue, "subject", c.StealerConfig.Nclient.NATSSubject)
 
 	// Queue Group ensures only one consumer gets a message
-	js.QueueSubscribe(c.Config.Nclient.NATSSubject, jetStreamQueue, func(msg *nats.Msg) {
+	js.QueueSubscribe(c.StealerConfig.Nclient.NATSSubject, jetStreamQueue, func(msg *nats.Msg) {
 		var pod corev1.Pod
 		var donorPod common.DonorPod
 		var donorUUID string
 		var kvKey string
 		var waitTime int
-		var stealerUUID = c.Config.StealerUUID
-		slog.Info("Received message", "subject", c.Config.Nclient.NATSSubject, "data", string(msg.Data))
+		var stealerUUID = c.StealerConfig.StealerUUID
+		slog.Info("Received message", "subject", c.StealerConfig.Nclient.NATSSubject, "data", string(msg.Data))
 
 		// Deserialize the entire donotPodMap metadata to JSON
 		err := json.Unmarshal(msg.Data, &donorPod)
@@ -72,7 +76,7 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 		pod = *donorPod.Pod
 		slog.Info("Deserialized Pod", "pod", pod)
 		// Check if the Pod already exists
-		_, err = c.Cli.CoreV1().Pods(pod.Namespace).Get(context.TODO(), pod.Name, metav1.GetOptions{})
+		_, err = c.K8SCli.CoreV1().Pods(pod.Namespace).Get(context.TODO(), pod.Name, metav1.GetOptions{})
 		if err == nil {
 			slog.Info("Pod already exists, skipping",
 				"podName", pod.Name, "podNamespace", pod.Namespace)
@@ -84,9 +88,9 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 			msg.Nak()
 			return
 		}
-		donorUUID = donorPod.DonorUUID
-		kvKey = donorPod.KVKey
-		waitTime = donorPod.WaitTime
+		donorUUID = donorPod.DonorDetails.DonorUUID
+		kvKey = donorPod.DonorDetails.KVKey
+		waitTime = donorPod.DonorDetails.WaitTime
 		slog.Info("Deserialized", "donorUUID", donorUUID, "kvKey", kvKey, "waitTime", waitTime)
 
 		// Check if message is already processed
@@ -96,7 +100,7 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 			if otherStealerUUID == stealerUUID {
 				slog.Info("Skipping Pod, I am already processed it", "podName", pod.Name,
 					"podNamespace", pod.Namespace, "stealerUUID", stealerUUID)
-				StealPod(c.Cli, pod, donorUUID, stealerUUID)
+				StealPod(c.K8SCli, pod, donorUUID, stealerUUID)
 				msg.Ack()
 			} else {
 				slog.Info("Skipping Pod, already processed by another stealer", "podName", pod.Name,
@@ -112,7 +116,7 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 			msg.Nak()
 		}
 
-		createdPod, err := StealPod(c.Cli, pod, donorUUID, stealerUUID)
+		createdPod, err := StealPod(c.K8SCli, pod, donorUUID, stealerUUID)
 		if err != nil {
 			slog.Error("Failed to steal Pod", "error", err)
 			msg.Nak()
@@ -127,8 +131,29 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 		// Watch the created pod for every 5 sec and send it status to donor
 		go func() {
 			pollKVKey := common.GeneratePollStealWorkloadKVKey(donorUUID, stealerUUID, pod.Namespace, pod.Name)
-			checkForAnyFailuresOrRestarts(c.Cli, createdPod, kv, pollKVKey, waitTime)
+			checkForAnyFailuresOrRestarts(c.K8SCli, createdPod, kv, pollKVKey, waitTime)
 		}()
+
+		// Exposing the stolen Pod ports via a Service
+		service, err := CreateService(c.K8SCli, *createdPod, donorUUID, stealerUUID)
+		if err != nil {
+			slog.Error("Failed to create Service", "error", err)
+			return
+		}
+		slog.Info("Successfully created Service", "service", service)
+
+		// Export the Service via Submariner
+		serviceExport, err := ExportService(c.K8SConfig, service)
+		if err != nil {
+			slog.Error("Failed to export Service via submariner", "error", err)
+			return
+		}
+		slog.Info("Successfully exported a service via submariner", "serviceExport", serviceExport)
+		var fqdns []string
+		for _, port := range service.Spec.Ports {
+			fqdns = append(fqdns, fmt.Sprintf("%s.%s.svc.clusterset.local:%d", service.Name, service.Namespace, port.Port))
+		}
+		slog.Info("Access the service with the FQDN", "service", service, "fqdns", fqdns)
 
 	})
 	select {}
@@ -244,6 +269,102 @@ func isPodSuccesfullyRunning(clientset *kubernetes.Clientset, namespace, name st
 		}
 	}
 }
+
+func CreateService(cli *kubernetes.Clientset, pod corev1.Pod, donorUUID string, stealerUUID string) (*corev1.Service, error) {
+	var ports []corev1.ServicePort
+	for _, container := range pod.Spec.Containers {
+		for _, port := range container.Ports {
+			ports = append(ports, corev1.ServicePort{
+				Name:       port.Name,
+				Protocol:   port.Protocol,
+				Port:       port.ContainerPort,
+				TargetPort: intstr.FromInt(int(port.ContainerPort)),
+			})
+		}
+	}
+	sName := pod.Name + "-service"
+	sNamespace := pod.Namespace
+
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sName,
+			Namespace: sNamespace,
+			Labels:    fetchStolenPodLablesMap(pod, donorUUID, stealerUUID),
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: pod.Labels,
+			Ports:    ports,
+			Type:     corev1.ServiceTypeClusterIP,
+		},
+	}
+
+	createdService, err := cli.CoreV1().Services(sNamespace).Create(context.TODO(), service, metav1.CreateOptions{})
+	if err != nil {
+		slog.Error("Failed to create Service", "error", err)
+		return nil, err
+	}
+
+	slog.Info("Successfully created Service", "service", createdService)
+	return createdService, nil
+}
+
+// func ExportService(K8SConfig *rest.Config, service *corev1.Service) (*apiextensionsv1.CustomResourceDefinition, error) {
+// 	// Create a new scheme and register the Submariner types
+// 	sch := runtime.NewScheme()
+// 	err := scheme.AddToScheme(sch)
+// 	if err != nil {
+// 		slog.Error("Failed to add Submariner types to scheme", "error", err)
+// 	}
+
+// 	// Create a Kubernetes client
+// 	k8sClient, err := client.New(K8SConfig, client.Options{Scheme: scheme.Scheme})
+// 	if err != nil {
+// 		slog.Error("Error creating Kubernetes client", "error", err)
+// 		return nil, err
+// 	}
+
+// 	// Define the ServiceExport object
+// 	serviceExport := &apiextensionsv1.CustomResourceDefinition{
+// 		ObjectMeta: metav1.ObjectMeta{
+// 			Name:      "serviceexports.submariner.io",
+// 			Namespace: service.Namespace,
+// 		},
+// 		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+// 			Group: "submariner.io",
+// 			Names: apiextensionsv1.CustomResourceDefinitionNames{
+// 				Kind:     "ServiceExport",
+// 				Plural:   "serviceexports",
+// 				Singular: "serviceexport",
+// 			},
+// 			Scope: apiextensionsv1.NamespaceScoped,
+// 			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+// 				{
+// 					Name:    "v1alpha1",
+// 					Served:  true,
+// 					Storage: true,
+// 					Schema: &apiextensionsv1.CustomResourceValidation{
+// 						OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+// 							Type: "object",
+// 							Properties: map[string]apiextensionsv1.JSONSchemaProps{
+// 								"spec": {
+// 									Type: "object",
+// 								},
+// 							},
+// 						},
+// 					},
+// 				},
+// 			},
+// 		},
+// 	}
+
+// 	// Create the ServiceExport in the cluster
+// 	err = k8sClient.Create(context.TODO(), serviceExport)
+// 	if err != nil {
+// 		slog.Error("Failed to create ServiceExport", "error", err)
+// 		return nil, err
+// 	}
+// 	return serviceExport, nil
+// }
 
 func checkForAnyFailuresOrRestarts(cli *kubernetes.Clientset, pod *corev1.Pod, kv nats.KeyValue, pollKVKey string, timeoutInMin int) error {
 	// Start polling the KV store for status updates

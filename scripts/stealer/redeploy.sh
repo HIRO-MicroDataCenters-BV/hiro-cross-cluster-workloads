@@ -12,4 +12,5 @@ echo "Load Image to Kind cluster named '$CLUSTER_NAME'"
 kind load docker-image --name $CLUSTER_NAME workloadstealer:alpha1
 
 echo "Restarting Worker Server"
-kubectl rollout restart deployment workload-stealer -n hiro
+kubectl apply -f deploy/stealer/deployment.yaml --context kind-$CLUSTER_NAME
+kubectl rollout restart deployment workload-stealer -n hiro --context kind-$CLUSTER_NAME

@@ -13,21 +13,24 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	watch "k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 type notify struct {
-	config stealer.SIConfig
-	cli    *kubernetes.Clientset
+	config    stealer.SIConfig
+	k8scli    *kubernetes.Clientset
+	k8sconfig *rest.Config
 }
 
 func New(config stealer.SIConfig) (*notify, error) {
-	clientset, err := common.GetK8sClientSet()
+	clientset, k8sconf, err := common.GetK8sClientAndConfigSet()
 	if err != nil {
 		return nil, err
 	}
 	return &notify{
-		cli:    clientset,
-		config: config,
+		k8scli:    clientset,
+		k8sconfig: k8sconf,
+		config:    config,
 	}, nil
 }
 
@@ -46,7 +49,7 @@ func (n *notify) Start(stopChan chan<- bool) error {
 	slog.Info("Connected to NATS server")
 
 	slog.Info("Watching for Pod events")
-	podWatch, err := n.cli.CoreV1().Pods("").Watch(context.Background(), metav1.ListOptions{})
+	podWatch, err := n.k8scli.CoreV1().Pods("").Watch(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		slog.Error("Failed to watch pods: ", "error", err)
 		return err
