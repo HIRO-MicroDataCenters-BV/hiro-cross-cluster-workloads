@@ -140,6 +140,10 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 			slog.Error("Failed to create Service", "error", err)
 			return
 		}
+		if service == nil {
+			slog.Info("No ports are exposed in the Pod", "pod", createdPod)
+			return
+		}
 		slog.Info("Successfully created Service", "service", service)
 
 		// Export the Service via Submariner
@@ -281,6 +285,10 @@ func CreateService(cli *kubernetes.Clientset, pod corev1.Pod, donorUUID string, 
 				TargetPort: intstr.FromInt(int(port.ContainerPort)),
 			})
 		}
+	}
+	if ports != nil || len(ports) == 0 {
+		slog.Info("No ports are exposed in the Pod", "pod", pod)
+		return nil, nil
 	}
 	sName := pod.Name + "-service"
 	sNamespace := pod.Namespace

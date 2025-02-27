@@ -1,4 +1,4 @@
-package validate
+package mutate
 
 import (
 	"context"
@@ -15,6 +15,7 @@ import (
 	"github.com/mattbaird/jsonpatch"
 	"github.com/nats-io/nats.go"
 	admission "k8s.io/api/admission/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
@@ -68,10 +69,11 @@ func (v *validator) Mutate(ar admission.AdmissionReview) *admission.AdmissionRes
 	}
 	raw := ar.Request.Object.Raw
 	pod := corev1.Pod{}
-	svc := corev1.Service{}
+	job := batchv1.Job{}
 
 	if ar.Request.Kind.Kind == "Pod" {
-		if _, _, err := common.Deserializer.Decode(raw, nil, &pod); err != nil {
+		_, _, err := common.Deserializer.Decode(raw, nil, &pod)
+		if err != nil {
 			slog.Error("failed to decode pod", "error", err)
 			return &admission.AdmissionResponse{
 				Result: &metav1.Status{
@@ -80,8 +82,8 @@ func (v *validator) Mutate(ar admission.AdmissionReview) *admission.AdmissionRes
 			}
 		}
 		return v.mutateResourceWrapper(&pod)
-	} else if ar.Request.Kind.Kind == "Service" {
-		if _, _, err := common.Deserializer.Decode(raw, nil, &svc); err != nil {
+	} else if ar.Request.Kind.Kind == "Job" {
+		if _, _, err := common.Deserializer.Decode(raw, nil, &job); err != nil {
 			slog.Error("failed to decode service", "error", err)
 			return &admission.AdmissionResponse{
 				Result: &metav1.Status{
@@ -89,7 +91,7 @@ func (v *validator) Mutate(ar admission.AdmissionReview) *admission.AdmissionRes
 				},
 			}
 		}
-		return v.mutateResourceWrapper(&svc)
+		return v.mutateResourceWrapper(&job)
 	}
 	return nil
 }
@@ -106,12 +108,12 @@ func (v *validator) mutateResourceWrapper(resource runtime.Object) *admission.Ad
 		labels = resourceObj.Labels
 		isNotEligibleToSteal = common.IsPodLableExists(resourceObj, v.vconfig.LableToFilter)
 		resourceType = "Pod"
-	case *corev1.Service:
+	case *batchv1.Job:
 		resourceName = resourceObj.Name
 		resourceNamespace = resourceObj.Namespace
 		labels = resourceObj.Labels
 		isNotEligibleToSteal = common.IsServiceLableExists(resourceObj, v.vconfig.LableToFilter)
-		resourceType = "Service"
+		resourceType = "Job"
 	default:
 		return &admission.AdmissionResponse{Allowed: true}
 	}
@@ -321,14 +323,14 @@ func InformAboutResource(resource runtime.Object, vconfig donor.DVConfig, js nat
 		}
 		metadataJSON, err = json.Marshal(donorPod)
 		donorUUID = vconfig.DonorUUID
-	case *corev1.Service:
-		donorService := common.DonorService{
+	case *batchv1.Job:
+		donorService := common.DonorJob{
 			DonorDetails: common.DonorDetails{
 				DonorUUID: vconfig.DonorUUID,
 				KVKey:     kvKey,
 				WaitTime:  10,
 			},
-			Service: resourceObj,
+			Job: resourceObj,
 		}
 		metadataJSON, err = json.Marshal(donorService)
 		donorUUID = vconfig.DonorUUID
@@ -352,86 +354,6 @@ func InformAboutResource(resource runtime.Object, vconfig donor.DVConfig, js nat
 
 	return WaitToGetResourceStolen(vconfig.WaitToGetPodStolen, kv, kvKey, vconfig)
 }
-
-// func InformAboutPod(pod *corev1.Pod, vconfig donor.DVConfig, js nats.JetStreamContext,
-// 	kv nats.KeyValue, kvKey string) (string, error) {
-// 	// Store "Pending" in KV Store
-// 	err := vconfig.Nconfig.PutKeyValue(kv, kvKey, common.DonorKVValuePending)
-// 	if err != nil {
-// 		slog.Error("Failed to put value in KV bucket: ", "error", err,
-// 			"key", kvKey, "value", common.DonorKVValuePending)
-// 		return "", err
-// 	}
-
-// 	donorPod := common.DonorPod{
-// 		DonorDetails: common.DonorDetails{
-// 			DonorUUID: vconfig.DonorUUID,
-// 			KVKey:     kvKey,
-// 			WaitTime:  10,
-// 		},
-// 		Pod: pod,
-// 	}
-
-// 	slog.Info("Created donorPod structure", "struct", donorPod)
-
-// 	// Serialize the entire Pod metadata to JSON
-// 	metadataJSON, err := json.Marshal(donorPod)
-// 	if err != nil {
-// 		slog.Error("Failed to serialize donorPod", "error", err, "donorPod", donorPod)
-// 		return "", err
-// 	}
-
-// 	// Publish notification to JetStreams
-// 	err = vconfig.Nconfig.PublishJSMessage(js, metadataJSON)
-// 	if err != nil {
-// 		slog.Error("Failed to publish pod metadata to JS", "error", err, "subject", vconfig.Nconfig.NATSSubject, "donorUUID", vconfig.DonorUUID)
-// 		return "", err
-// 	}
-// 	slog.Info("Published Pod metadata to JS", "subject", vconfig.Nconfig.NATSSubject, "metadata", string(metadataJSON), "donorUUID", vconfig.DonorUUID)
-// 	metrics.DonorPublishedTasksTotal.WithLabelValues(vconfig.DonorUUID).Inc()
-
-// 	return WaitToGetPodStolen(vconfig.WaitToGetPodStolen, kv, kvKey, vconfig)
-// }
-
-// func InformAboutService(svc *corev1.Service, vconfig donor.DVConfig, js nats.JetStreamContext,
-// 	kv nats.KeyValue, kvKey string) (string, error) {
-// 	// Store "Pending" in KV Store
-// 	err := vconfig.Nconfig.PutKeyValue(kv, kvKey, common.DonorKVValuePending)
-// 	if err != nil {
-// 		slog.Error("Failed to put value in KV bucket: ", "error", err,
-// 			"key", kvKey, "value", common.DonorKVValuePending)
-// 		return "", err
-// 	}
-
-// 	donorService := common.DonorService{
-// 		DonorDetails: common.DonorDetails{
-// 			DonorUUID: vconfig.DonorUUID,
-// 			KVKey:     kvKey,
-// 			WaitTime:  10,
-// 		},
-// 		Service: svc,
-// 	}
-
-// 	slog.Info("Created donorService structure", "struct", donorService)
-
-// 	// Serialize the entire Pod metadata to JSON
-// 	metadataJSON, err := json.Marshal(donorService)
-// 	if err != nil {
-// 		slog.Error("Failed to serialize donorService", "error", err, "donorService", donorService)
-// 		return "", err
-// 	}
-
-// 	// Publish notification to JetStreams
-// 	err = vconfig.Nconfig.PublishJSMessage(js, metadataJSON)
-// 	if err != nil {
-// 		slog.Error("Failed to publish service metadata to JS", "error", err, "subject", vconfig.Nconfig.NATSSubject, "donorUUID", vconfig.DonorUUID)
-// 		return "", err
-// 	}
-// 	slog.Info("Published service metadata to JS", "subject", vconfig.Nconfig.NATSSubject, "metadata", string(metadataJSON), "donorUUID", vconfig.DonorUUID)
-// 	metrics.DonorPublishedTasksTotal.WithLabelValues(vconfig.DonorUUID).Inc()
-
-// 	return WaitToGetPodStolen(vconfig.WaitToGetPodStolen, kv, kvKey, vconfig)
-// }
 
 func WaitToGetResourceStolen(waitTime int, kv nats.KeyValue, kvKey string, vconfig donor.DVConfig) (string, error) {
 	waitTime = waitTime * 60 // Convert minutes to seconds
@@ -498,32 +420,30 @@ func mutateResource(resource runtime.Object, donorUUID string, stealerUUID strin
 			}
 		}
 
-	case *corev1.Service:
-		originalSvc := resourceObj.DeepCopy()
-		modifiedSvc := originalSvc.DeepCopy()
+	case *batchv1.Job:
+		originalJob := resourceObj.DeepCopy()
+		modifiedJob := originalJob.DeepCopy()
 
-		modifiedSvc.Spec.ClusterIP = "None"
-		modifiedSvc.Spec.Ports = nil
-		modifiedSvc.Spec.Selector = nil
+		modifiedJob.Spec.Selector = nil
 
-		modifiedSvc.Labels["donorUUID"] = donorUUID
-		modifiedSvc.Labels["stealerUUID"] = stealerUUID
+		modifiedJob.Labels["donorUUID"] = donorUUID
+		modifiedJob.Labels["stealerUUID"] = stealerUUID
 
-		originalJSON, err = json.Marshal(originalSvc)
+		originalJSON, err = json.Marshal(originalJob)
 		if err != nil {
 			return &admission.AdmissionResponse{
 				Result: &metav1.Status{
-					Message: fmt.Sprintf("Failed to marshal original service: %v", err),
+					Message: fmt.Sprintf("Failed to marshal original job: %v", err),
 					Code:    http.StatusInternalServerError,
 				},
 			}
 		}
 
-		modifiedJSON, err = json.Marshal(modifiedSvc)
+		modifiedJSON, err = json.Marshal(modifiedJob)
 		if err != nil {
 			return &admission.AdmissionResponse{
 				Result: &metav1.Status{
-					Message: fmt.Sprintf("Failed to marshal modified service: %v", err),
+					Message: fmt.Sprintf("Failed to marshal modified job: %v", err),
 					Code:    http.StatusInternalServerError,
 				},
 			}
@@ -567,149 +487,6 @@ func mutateResource(resource runtime.Object, donorUUID string, stealerUUID strin
 		}(),
 	}
 }
-
-// func mutateService(svc *corev1.Service, donorUUID string, stealerUUID string) *admission.AdmissionResponse {
-// 	originalSvc := svc.DeepCopy()
-// 	modifiedSvc := originalSvc.DeepCopy()
-// 	// Replace the service spec with an invalid configuration to keep it in pending state
-// 	modifiedSvc.Spec.ClusterIP = "None"
-// 	modifiedSvc.Spec.Ports = nil
-// 	modifiedSvc.Spec.Selector = nil
-
-// 	// Marshal the modified service to JSON
-// 	originalJSON, err := json.Marshal(originalSvc)
-// 	if err != nil {
-// 		return &admission.AdmissionResponse{
-// 			Result: &metav1.Status{
-// 				Message: fmt.Sprintf("Failed to marshal original service: %v", err),
-// 				Code:    http.StatusInternalServerError,
-// 			},
-// 		}
-// 	}
-
-// 	// Marshal the modified service to JSON
-// 	modifiedJSON, err := json.Marshal(modifiedSvc)
-// 	if err != nil {
-// 		return &admission.AdmissionResponse{
-// 			Result: &metav1.Status{
-// 				Message: fmt.Sprintf("Failed to marshal modified service: %v", err),
-// 				Code:    http.StatusInternalServerError,
-// 			},
-// 		}
-// 	}
-
-// 	// Create JSON Patch
-// 	patch, err := jsonpatch.CreatePatch(originalJSON, modifiedJSON)
-// 	if err != nil {
-// 		return &admission.AdmissionResponse{
-// 			Result: &metav1.Status{
-// 				Message: fmt.Sprintf("Failed to create patch: %v", err),
-// 				Code:    http.StatusInternalServerError,
-// 			},
-// 		}
-// 	}
-
-// 	// Marshal the patch to JSON
-// 	patchBytes, err := json.Marshal(patch)
-// 	if err != nil {
-// 		return &admission.AdmissionResponse{
-// 			Result: &metav1.Status{
-// 				Message: fmt.Sprintf("Failed to marshal patch: %v", err),
-// 				Code:    http.StatusInternalServerError,
-// 			},
-// 		}
-// 	}
-
-// 	// Return the AdmissionResponse with the mutated Service
-// 	return &admission.AdmissionResponse{
-// 		Allowed: true,
-// 		Patch:   patchBytes,
-// 		PatchType: func() *admission.PatchType {
-// 			pt := admission.PatchTypeJSONPatch
-// 			return &pt
-// 		}(),
-// 	}
-// }
-
-// func mutatePod(pod *corev1.Pod, donorUUID string, stealerUUID string) *admission.AdmissionResponse {
-// 	originalPod := pod.DeepCopy()
-// 	modifiedPod := originalPod.DeepCopy()
-
-// 	// // Replace all containers with our dummy container
-// 	// for i := range modifiedPod.Spec.Containers {
-// 	// 	container := &modifiedPod.Spec.Containers[i]
-// 	// 	container.Image = "busybox"
-// 	// 	container.Command = []string{
-// 	// 		"/bin/sh",
-// 	// 		"-c",
-// 	// 		"echo 'Pod got stolen' && sleep infinity",
-// 	// 	}
-// 	// }
-
-// 	modifiedPod.Spec.NodeSelector = mutatePodNodeSelectorMap
-// 	if modifiedPod.Labels == nil {
-// 		modifiedPod.Labels = make(map[string]string)
-// 	}
-// 	for key, value := range mutatePodLablesMap {
-// 		modifiedPod.Labels[key] = value
-// 	}
-// 	modifiedPod.Labels["donorUUID"] = donorUUID
-// 	modifiedPod.Labels["stealerUUID"] = stealerUUID
-
-// 	// Marshal the modified pod to JSON
-// 	originalJSON, err := json.Marshal(originalPod)
-// 	if err != nil {
-// 		return &admission.AdmissionResponse{
-// 			Result: &metav1.Status{
-// 				Message: fmt.Sprintf("Failed to marshal original pod: %v", err),
-// 				Code:    http.StatusInternalServerError,
-// 			},
-// 		}
-// 	}
-
-// 	// Marshal the modified pod to JSON
-// 	modifiedJSON, err := json.Marshal(modifiedPod)
-// 	if err != nil {
-// 		return &admission.AdmissionResponse{
-// 			Result: &metav1.Status{
-// 				Message: fmt.Sprintf("Failed to marshal modified pod: %v", err),
-// 				Code:    http.StatusInternalServerError,
-// 			},
-// 		}
-// 	}
-
-// 	// Create JSON Patch
-// 	patch, err := jsonpatch.CreatePatch(originalJSON, modifiedJSON)
-// 	if err != nil {
-// 		return &admission.AdmissionResponse{
-// 			Result: &metav1.Status{
-// 				Message: fmt.Sprintf("Failed to create patch: %v", err),
-// 				Code:    http.StatusInternalServerError,
-// 			},
-// 		}
-// 	}
-
-// 	// Marshal the patch to JSON
-// 	patchBytes, err := json.Marshal(patch)
-// 	if err != nil {
-// 		return &admission.AdmissionResponse{
-// 			Result: &metav1.Status{
-// 				Message: fmt.Sprintf("Failed to marshal patch: %v", err),
-// 				Code:    http.StatusInternalServerError,
-// 			},
-// 		}
-// 	}
-
-// 	// Return the AdmissionResponse with the mutated Pod
-// 	return &admission.AdmissionResponse{
-// 		Allowed: true,
-// 		Patch:   patchBytes,
-// 		PatchType: func() *admission.PatchType {
-// 			pt := admission.PatchTypeJSONPatch
-// 			return &pt
-// 		}(),
-// 	}
-// }
 
 func pollStolenPodStatus(kv nats.KeyValue, pollKVKey string, timeoutInMin int) error {
 	// Start polling the KV store for status updates

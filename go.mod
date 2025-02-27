@@ -7,34 +7,21 @@ require (
 	github.com/nats-io/nats.go v1.39.0
 	github.com/prometheus/client_golang v1.21.0
 	github.com/spf13/viper v1.19.0
-	github.com/submariner-io/submariner v0.19.2
 	k8s.io/api v0.32.1
 	k8s.io/apimachinery v0.32.1
 	k8s.io/client-go v0.32.1
+	sigs.k8s.io/controller-runtime v0.19.0
 )
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/coreos/go-semver v0.3.1 // indirect
 	github.com/evanphx/json-patch v5.9.0+incompatible // indirect
 	github.com/evanphx/json-patch/v5 v5.9.0 // indirect
-	github.com/kelseyhightower/envconfig v1.4.0 // indirect
-	github.com/mattn/go-colorable v0.1.13 // indirect
-	github.com/mattn/go-isatty v0.0.19 // indirect
-	github.com/openshift/api v0.0.0-20230714214528-de6ad7979b00 // indirect
-	github.com/operator-framework/operator-lib v0.15.0 // indirect
-	github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring v0.76.2 // indirect
-	github.com/prometheus-operator/prometheus-operator/pkg/client v0.76.2 // indirect
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.62.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
-	github.com/rs/zerolog v1.33.0 // indirect
-	github.com/submariner-io/admiral v0.19.2 // indirect
-	github.com/submariner-io/submariner-operator v0.19.0 // indirect
-	gomodules.xyz/jsonpatch/v2 v2.4.0 // indirect
 	k8s.io/apiextensions-apiserver v0.31.1 // indirect
-	sigs.k8s.io/controller-runtime v0.19.0 // indirect
 )
 
 require (

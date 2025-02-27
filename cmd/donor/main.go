@@ -9,8 +9,8 @@ import (
 	"strings"
 
 	"hirocrossclusterworkloads/internal/services/donor/controller"
+	"hirocrossclusterworkloads/internal/services/donor/mutate"
 	results "hirocrossclusterworkloads/internal/services/donor/results"
-	"hirocrossclusterworkloads/internal/services/donor/validate"
 	natsconnect "hirocrossclusterworkloads/pkg/connector/nats"
 	"hirocrossclusterworkloads/pkg/core/donor"
 	"hirocrossclusterworkloads/pkg/metrics"
@@ -49,7 +49,7 @@ func main() {
 		LableToFilter:      getENVValue("NO_WORK_LOAD_STEAL_LABLE").(string),
 		WaitToGetPodStolen: getENVValue("WAIT_TIME_TO_GET_WORKLOAD_STOLEN_IN_MIN").(int),
 	}
-	validator, err := validate.New(validatorConfig)
+	validator, err := mutate.New(validatorConfig)
 	if err != nil {
 		log.Fatal(err)
 	}

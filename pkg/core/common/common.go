@@ -3,6 +3,7 @@ package common
 import (
 	"strings"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -41,9 +42,9 @@ type DonorPod struct {
 	Pod          *corev1.Pod  `json:"pod"`
 }
 
-type DonorService struct {
-	DonorDetails DonorDetails    `json:"donorDetails"`
-	Service      *corev1.Service `json:"service"`
+type DonorJob struct {
+	DonorDetails DonorDetails `json:"donorDetails"`
+	Job          *batchv1.Job `json:"service"`
 }
 
 type Result struct {
@@ -138,8 +139,7 @@ func IsPodLableExists(pod *corev1.Pod, lable string) bool {
 	}
 	return true
 }
-
-func IsServiceLableExists(svc *corev1.Service, lable string) bool {
+func IsServiceLableExists(svc *batchv1.Job, lable string) bool {
 	value, ok := svc.Labels[lable]
 	if !ok || strings.ToLower(value) == "false" {
 		return false

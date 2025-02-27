@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"hirocrossclusterworkloads/internal/services/stealer/informer"
+	"hirocrossclusterworkloads/internal/services/stealer/results"
 	"hirocrossclusterworkloads/internal/services/stealer/worker"
 	natsconnect "hirocrossclusterworkloads/pkg/connector/nats"
 	"hirocrossclusterworkloads/pkg/core/stealer"
@@ -53,7 +53,7 @@ func main() {
 		StealerUUID:      stealerUUID,
 		IgnoreNamespaces: strings.Split(getENVValue("IGNORE_NAMESPACES").(string), ","),
 	}
-	informer, err := informer.New(informerConfig)
+	informer, err := results.New(informerConfig)
 	if err != nil {
 		log.Fatal(err)
 	}
