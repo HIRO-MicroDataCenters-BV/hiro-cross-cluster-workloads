@@ -290,7 +290,10 @@ func CreateService(cli *kubernetes.Clientset, pod corev1.Pod, donorUUID string, 
 		slog.Info("No ports are exposed in the Pod", "pod", pod)
 		return nil, nil
 	}
-	sName := pod.Name + "-service"
+	sName, ok := pod.Labels["serviceName"]
+	if !ok {
+		sName = pod.Name + "-service"
+	}
 	sNamespace := pod.Namespace
 
 	service := &corev1.Service{

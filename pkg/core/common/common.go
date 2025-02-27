@@ -132,15 +132,8 @@ func AreMapsEqual(map1, map2 map[string]string) bool {
 	return true
 }
 
-func IsPodLableExists(pod *corev1.Pod, lable string) bool {
-	value, ok := pod.Labels[lable]
-	if !ok || strings.ToLower(value) == "false" {
-		return false
-	}
-	return true
-}
-func IsServiceLableExists(svc *batchv1.Job, lable string) bool {
-	value, ok := svc.Labels[lable]
+func IsLabelExists(obj metav1.Object, label string) bool {
+	value, ok := obj.GetLabels()[label]
 	if !ok || strings.ToLower(value) == "false" {
 		return false
 	}

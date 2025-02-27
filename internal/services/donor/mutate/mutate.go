@@ -59,8 +59,10 @@ func (v *validator) Validate(ar admission.AdmissionReview) *admission.AdmissionR
 func (v *validator) Mutate(ar admission.AdmissionReview) *admission.AdmissionResponse {
 	slog.Info("Make pod Invalid")
 	podResource := metav1.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
-	if ar.Request.Resource != podResource {
-		slog.Error("expect resource does not match", "expected", ar.Request.Resource, "received", podResource)
+	jobResource := metav1.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"}
+	expectedResources := []metav1.GroupVersionResource{podResource, jobResource}
+	if ar.Request.Resource != podResource || ar.Request.Resource != jobResource {
+		slog.Error("expected resource does not match", "expected", expectedResources, "received", ar.Request.Resource)
 		return nil
 	}
 	if ar.Request.Operation != admission.Create {
@@ -106,13 +108,13 @@ func (v *validator) mutateResourceWrapper(resource runtime.Object) *admission.Ad
 		resourceName = resourceObj.Name
 		resourceNamespace = resourceObj.Namespace
 		labels = resourceObj.Labels
-		isNotEligibleToSteal = common.IsPodLableExists(resourceObj, v.vconfig.LableToFilter)
+		isNotEligibleToSteal = common.IsLabelExists(resourceObj, v.vconfig.LableToFilter)
 		resourceType = "Pod"
 	case *batchv1.Job:
 		resourceName = resourceObj.Name
 		resourceNamespace = resourceObj.Namespace
 		labels = resourceObj.Labels
-		isNotEligibleToSteal = common.IsServiceLableExists(resourceObj, v.vconfig.LableToFilter)
+		isNotEligibleToSteal = common.IsLabelExists(resourceObj, v.vconfig.LableToFilter)
 		resourceType = "Job"
 	default:
 		return &admission.AdmissionResponse{Allowed: true}
@@ -313,6 +315,8 @@ func InformAboutResource(resource runtime.Object, vconfig donor.DVConfig, js nat
 
 	switch resourceObj := resource.(type) {
 	case *corev1.Pod:
+		resourceObj.Labels["donorUUID"] = vconfig.DonorUUID
+		resourceObj.Labels["serviceName"] = resourceObj.Name + "-service"
 		donorPod := common.DonorPod{
 			DonorDetails: common.DonorDetails{
 				DonorUUID: vconfig.DonorUUID,
@@ -324,7 +328,8 @@ func InformAboutResource(resource runtime.Object, vconfig donor.DVConfig, js nat
 		metadataJSON, err = json.Marshal(donorPod)
 		donorUUID = vconfig.DonorUUID
 	case *batchv1.Job:
-		donorService := common.DonorJob{
+		resourceObj.Labels["donorUUID"] = vconfig.DonorUUID
+		donorJob := common.DonorJob{
 			DonorDetails: common.DonorDetails{
 				DonorUUID: vconfig.DonorUUID,
 				KVKey:     kvKey,
@@ -332,7 +337,7 @@ func InformAboutResource(resource runtime.Object, vconfig donor.DVConfig, js nat
 			},
 			Job: resourceObj,
 		}
-		metadataJSON, err = json.Marshal(donorService)
+		metadataJSON, err = json.Marshal(donorJob)
 		donorUUID = vconfig.DonorUUID
 	default:
 		return "", fmt.Errorf("unsupported resource type")
