@@ -20,6 +20,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 
+	"maps"
+
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -61,7 +63,7 @@ func (v *validator) Mutate(ar admission.AdmissionReview) *admission.AdmissionRes
 	podResource := metav1.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
 	jobResource := metav1.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"}
 	expectedResources := []metav1.GroupVersionResource{podResource, jobResource}
-	if ar.Request.Resource != podResource || ar.Request.Resource != jobResource {
+	if ar.Request.Resource != podResource && ar.Request.Resource != jobResource {
 		slog.Error("expected resource does not match", "expected", expectedResources, "received", ar.Request.Resource)
 		return nil
 	}
@@ -163,21 +165,17 @@ func (v *validator) mutateResourceWrapper(resource runtime.Object) *admission.Ad
 			// Create the resource again by adding a label
 			labels[common.StolenPodFailedLable] = "true"
 			slog.Info(fmt.Sprintf("Creating the %s here itself", resourceType), "name", resourceName, "namespace", resourceNamespace)
+			var createErr error
 			switch resourceObj := resource.(type) {
 			case *corev1.Pod:
-				_, createErr := v.cli.CoreV1().Pods(resourceNamespace).Create(context.TODO(), resourceObj, metav1.CreateOptions{})
-				if createErr != nil {
-					slog.Error(fmt.Sprintf("Failed to create %s", resourceType), "error", createErr)
-				} else {
-					slog.Info(fmt.Sprintf("Successfully created %s", resourceType), "name", resourceName, "namespace", resourceNamespace)
-				}
-			case *corev1.Service:
-				_, createErr := v.cli.CoreV1().Services(resourceNamespace).Create(context.TODO(), resourceObj, metav1.CreateOptions{})
-				if createErr != nil {
-					slog.Error(fmt.Sprintf("Failed to create %s", resourceType), "error", createErr)
-				} else {
-					slog.Info(fmt.Sprintf("Successfully created %s", resourceType), "name", resourceName, "namespace", resourceNamespace)
-				}
+				_, createErr = v.cli.CoreV1().Pods(resourceNamespace).Create(context.TODO(), resourceObj, metav1.CreateOptions{})
+			case *batchv1.Job:
+				_, createErr = v.cli.BatchV1().Jobs(resourceNamespace).Create(context.TODO(), resourceObj, metav1.CreateOptions{})
+			}
+			if createErr != nil {
+				slog.Error(fmt.Sprintf("Failed to create %s", resourceType), "error", createErr)
+			} else {
+				slog.Info(fmt.Sprintf("Successfully created %s", resourceType), "name", resourceName, "namespace", resourceNamespace)
 			}
 		}
 	}()
@@ -185,128 +183,24 @@ func (v *validator) mutateResourceWrapper(resource runtime.Object) *admission.Ad
 	return mutateResource(resource, v.vconfig.DonorUUID, stealerUUID)
 }
 
-// func (v *validator) mutatePodWrapper(pod *corev1.Pod) *admission.AdmissionResponse {
-// 	// Check if the pod has already been processed
-// 	_, exists := pod.Labels[common.StolenPodFailedLable]
-// 	if exists {
-// 		slog.Info("Pod has already been processed", "name", pod.Name, "namespace", pod.Namespace)
-// 		return &admission.AdmissionResponse{Allowed: true}
-// 	}
-// 	isNotEligibleToSteal := common.IsPodLableExists(pod, v.vconfig.LableToFilter)
-// 	if isNotEligibleToSteal {
-// 		slog.Info("Pod is not eligible to steal as it has the label", "name", pod.Name, "label", v.vconfig.LableToFilter)
-// 		return &admission.AdmissionResponse{Allowed: true}
-// 	}
-// 	ignoreNamespaces := v.vconfig.IgnoreNamespaces
-// 	slog.Info("Pod create event", "namespace", pod.Namespace, "name", pod.Name)
-// 	uniqueIgnoredNamespaces := common.MergeUnique(ignoreNamespaces, common.K8SNamespaces)
-// 	if common.IsItIgnoredNamespace(uniqueIgnoredNamespaces, pod.Namespace) {
-// 		slog.Info("Ignoring as Pod belongs to Ignored Namespaces", "namespaces", ignoreNamespaces)
-// 		return nil
-// 	}
-
-// 	natsConnect, js, kv, err := v.vconfig.Nconfig.GetNATSConnectJetStreamAndKeyValue()
-// 	if err != nil {
-// 		slog.Error("Failed to connect to NATS/JS/KV", "error", err, "natsConnect", natsConnect, "js", js, "kv", kv)
-// 		return &admission.AdmissionResponse{Allowed: true}
-// 	}
-// 	//defer natsConnect.Close()
-// 	//go func() {}()
-// 	// Make the pod to be stolen
-// 	kvKey := common.GenerateStealWorkloadKVKey(v.vconfig.DonorUUID, pod.Namespace, pod.Name)
-// 	stealerUUID, err := InformAboutResource(pod, v.vconfig, js, kv, kvKey)
-// 	if err != nil && stealerUUID == "" {
-// 		slog.Warn("Failed to make the pod to be stolen", "name", pod.Name, "namespace", pod.Namespace, "error", err)
-// 		return &admission.AdmissionResponse{Allowed: true}
-// 	}
-// 	slog.Info("Pod got stolen", "name", pod.Name, "namespace", pod.Namespace, "stealerUUID", stealerUUID)
-
-// 	go func() {
-// 		pollKVKey := common.GeneratePollStealWorkloadKVKey(v.vconfig.DonorUUID, stealerUUID, pod.Namespace, pod.Name)
-// 		err := pollStolenPodStatus(kv, pollKVKey, pollWaitTimeInMin)
-// 		if err != nil {
-// 			slog.Error("Failed to poll stolen pod status", "error", err)
-
-// 			// Create the pod again by adding a label
-// 			pod.Labels[common.StolenPodFailedLable] = "true"
-// 			slog.Info("Creating the pod here itself", "name", pod.Name, "namespace", pod.Namespace)
-// 			_, createErr := v.cli.CoreV1().Pods(pod.Namespace).Create(context.TODO(), pod, metav1.CreateOptions{})
-// 			if createErr != nil {
-// 				slog.Error("Failed to create pod", "error", createErr)
-// 			} else {
-// 				slog.Info("Successfully created pod", "name", pod.Name, "namespace", pod.Namespace)
-// 			}
-// 		}
-// 	}()
-
-// 	//Mutate pod so that it won't be scheduled
-// 	return mutatePod(pod, v.vconfig.DonorUUID, stealerUUID)
-// }
-
-// func (v *validator) mutateServiceWrapper(svc *corev1.Service) *admission.AdmissionResponse {
-// 	// Check if the Service has already been processed
-// 	_, exists := svc.Labels[common.StolenPodFailedLable]
-// 	if exists {
-// 		slog.Info("Service has already been processed", "name", svc.Name, "namespace", svc.Namespace)
-// 		return &admission.AdmissionResponse{Allowed: true}
-// 	}
-// 	isNotEligibleToSteal := common.IsServiceLableExists(svc, v.vconfig.LableToFilter)
-// 	if isNotEligibleToSteal {
-// 		slog.Info("Service is not eligible to steal as it has the label", "name", svc.Name, "label", v.vconfig.LableToFilter)
-// 		return &admission.AdmissionResponse{Allowed: true}
-// 	}
-// 	ignoreNamespaces := v.vconfig.IgnoreNamespaces
-// 	slog.Info("Service create event", "namespace", svc.Namespace, "name", svc.Name)
-// 	uniqueIgnoredNamespaces := common.MergeUnique(ignoreNamespaces, common.K8SNamespaces)
-// 	if common.IsItIgnoredNamespace(uniqueIgnoredNamespaces, svc.Namespace) {
-// 		slog.Info("Ignoring as Service belongs to Ignored Namespaces", "namespaces", ignoreNamespaces)
-// 		return nil
-// 	}
-
-// 	natsConnect, js, kv, err := v.vconfig.Nconfig.GetNATSConnectJetStreamAndKeyValue()
-// 	if err != nil {
-// 		slog.Error("Failed to connect to NATS/JS/KV", "error", err, "natsConnect", natsConnect, "js", js, "kv", kv)
-// 		return &admission.AdmissionResponse{Allowed: true}
-// 	}
-// 	//defer natsConnect.Close()
-// 	//go func() {}()
-// 	// Make the pod to be stolen
-// 	kvKey := common.GenerateStealWorkloadKVKey(v.vconfig.DonorUUID, svc.Namespace, svc.Name)
-// 	stealerUUID, err := InformAboutResource(svc, v.vconfig, js, kv, kvKey)
-// 	if err != nil && stealerUUID == "" {
-// 		slog.Warn("Failed to make the svc to be stolen", "name", svc.Name, "namespace", svc.Namespace, "error", err)
-// 		return &admission.AdmissionResponse{Allowed: true}
-// 	}
-// 	slog.Info("Service got stolen", "name", svc.Name, "namespace", svc.Namespace, "stealerUUID", stealerUUID)
-
-// 	go func() {
-// 		pollKVKey := common.GeneratePollStealWorkloadKVKey(v.vconfig.DonorUUID, stealerUUID, svc.Namespace, svc.Name)
-// 		err := pollStolenPodStatus(kv, pollKVKey, pollWaitTimeInMin)
-// 		if err != nil {
-// 			slog.Error("Failed to poll stolen svc status", "error", err)
-
-// 			// Create the pod again by adding a label
-// 			svc.Labels[common.StolenPodFailedLable] = "true"
-// 			slog.Info("Creating the service here itself", "name", svc.Name, "namespace", svc.Namespace)
-// 			_, createErr := v.cli.CoreV1().Services(svc.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{})
-// 			if createErr != nil {
-// 				slog.Error("Failed to create svc", "error", createErr)
-// 			} else {
-// 				slog.Info("Successfully created svc", "name", svc.Name, "namespace", svc.Namespace)
-// 			}
-// 		}
-// 	}()
-// 	//Mutate pod so that it won't be scheduled
-// 	return mutateService(svc, v.vconfig.DonorUUID, stealerUUID)
-// }
-
 func InformAboutResource(resource runtime.Object, vconfig donor.DVConfig, js nats.JetStreamContext,
 	kv nats.KeyValue, kvKey string) (string, error) {
 	// Store "Pending" in KV Store
-	err := vconfig.Nconfig.PutKeyValue(kv, kvKey, common.DonorKVValuePending)
+	emptyStealerDetails := common.StealerDetails{
+		StealerUUID:  common.DonorKVValuePending,
+		KVKey:        kvKey,
+		ExposedFQDNs: []string{},
+	}
+	emptyStealerDetailsBytes, err := json.Marshal(emptyStealerDetails)
+	if err != nil {
+		slog.Error("Failed to marshal emptyStealerDetails", "error", err)
+		return "", err
+	}
+
+	_, err = kv.Put(kvKey, emptyStealerDetailsBytes)
 	if err != nil {
 		slog.Error("Failed to put value in KV bucket: ", "error", err,
-			"key", kvKey, "value", common.DonorKVValuePending)
+			"key", kvKey, "value", emptyStealerDetails)
 		return "", err
 	}
 
@@ -365,9 +259,20 @@ func WaitToGetResourceStolen(waitTime int, kv nats.KeyValue, kvKey string, vconf
 	slog.Info(fmt.Sprintf("Waiting for %d seconds for ACK", waitTime))
 	for i := 0; i < waitTime; i++ {
 		time.Sleep(1 * time.Second) // Wait for 1 second
-		stealerUUID, err := vconfig.Nconfig.GetKeyValue(kv, kvKey)
-		if err == nil && string(stealerUUID) != common.DonorKVValuePending {
-			slog.Info("Published Pod metadata was processed", "donorUUID", vconfig.DonorUUID, "stealerUUID", stealerUUID)
+		entry, err := kv.Get(kvKey)
+		if err != nil {
+			slog.Error("Failed to get value from KV store", "error", err, "key", kvKey)
+			return "", err
+		}
+		servingStealerDetails := common.StealerDetails{}
+		err = json.Unmarshal(entry.Value(), &servingStealerDetails)
+		if err != nil {
+			slog.Error("Failed to unmarshal servingStealerDetails", "error", err)
+			return "", err
+		}
+		stealerUUID := servingStealerDetails.StealerUUID
+		if stealerUUID != common.DonorKVValuePending {
+			slog.Info("Published resource metadata was processed", "donorUUID", vconfig.DonorUUID, "stealerUUID", stealerUUID)
 			return stealerUUID, nil
 		}
 	}
@@ -395,13 +300,12 @@ func mutateResource(resource runtime.Object, donorUUID string, stealerUUID strin
 		// 	}
 		// }
 
+		// Modify nodeSelector to make sure the pod in pending state
 		modifiedPod.Spec.NodeSelector = mutatePodNodeSelectorMap
 		if modifiedPod.Labels == nil {
 			modifiedPod.Labels = make(map[string]string)
 		}
-		for key, value := range mutatePodLablesMap {
-			modifiedPod.Labels[key] = value
-		}
+		maps.Copy(modifiedPod.Labels, mutatePodLablesMap)
 		modifiedPod.Labels["donorUUID"] = donorUUID
 		modifiedPod.Labels["stealerUUID"] = stealerUUID
 
@@ -429,6 +333,7 @@ func mutateResource(resource runtime.Object, donorUUID string, stealerUUID strin
 		originalJob := resourceObj.DeepCopy()
 		modifiedJob := originalJob.DeepCopy()
 
+		// Modify spec selctor to make sure the job in pending state
 		modifiedJob.Spec.Selector = nil
 
 		modifiedJob.Labels["donorUUID"] = donorUUID

@@ -8,13 +8,20 @@ then
 fi
 
 # Set default value for cluster name
-CLUSTER_NAME=${1:-donor}
+CLUSTER_NAME=${1}
+
+# Check if cluster name is provided
+if [ -z "$CLUSTER_NAME" ]; then
+	echo "Usage: $0 <cluster_name>"
+	exit 1
+fi
+
 # Check if broker-info.subm file exists
 if [ ! -f broker-info.subm ]; then
 	echo "broker-info.subm file not found. Please install the broker to generate this file."
 	exit 1
 fi
 
-echo "Join the cluster to the broker"
+echo "***Join the cluster to the broker***"
 subctl join broker-info.subm --context=kind-$CLUSTER_NAME --check-broker-certificate=false
 subctl show all --context=kind-$CLUSTER_NAME || echo true

@@ -96,7 +96,14 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 		// Check if message is already processed
 		entry, err := kv.Get(kvKey)
 		if err == nil && string(entry.Value()) != common.DonorKVValuePending {
-			otherStealerUUID := string(entry.Value())
+			servingStealerDetails := common.StealerDetails{}
+			err = json.Unmarshal(entry.Value(), &servingStealerDetails)
+			if err != nil {
+				slog.Error("Failed to unmarshal servingStealerDetails", "error", err)
+				msg.Nak()
+				return
+			}
+			otherStealerUUID := servingStealerDetails.StealerUUID
 			if otherStealerUUID == stealerUUID {
 				slog.Info("Skipping Pod, I am already processed it", "podName", pod.Name,
 					"podNamespace", pod.Namespace, "stealerUUID", stealerUUID)
@@ -109,13 +116,6 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 			return
 		}
 
-		// Mark with stealerUUID in KV by this stealer
-		_, err = kv.Update(kvKey, []byte(stealerUUID), entry.Revision())
-		if err != nil && !errors.Is(err, nats.ErrKeyExists) {
-			slog.Error("Failed to put value in KV bucket: ", "error", err)
-			msg.Nak()
-		}
-
 		createdPod, err := StealPod(c.K8SCli, pod, donorUUID, stealerUUID)
 		if err != nil {
 			slog.Error("Failed to steal Pod", "error", err)
@@ -124,9 +124,6 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 		slog.Info("Successfully stole the Pod", "pod", createdPod)
 		metrics.StealerClaimedTasksTotal.WithLabelValues(stealerUUID).Inc()
 		metrics.StolenTasksTotal.WithLabelValues(donorUUID, stealerUUID).Inc()
-
-		// Acknowledge JetStream message
-		msg.Ack()
 
 		// Watch the created pod for every 5 sec and send it status to donor
 		go func() {
@@ -158,6 +155,26 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 			fqdns = append(fqdns, fmt.Sprintf("%s.%s.svc.clusterset.local:%d", service.Name, service.Namespace, port.Port))
 		}
 		slog.Info("Access the service with the FQDN", "service", service, "fqdns", fqdns)
+
+		stealerDetails := common.StealerDetails{
+			StealerUUID:  stealerUUID,
+			KVKey:        kvKey,
+			ExposedFQDNs: fqdns,
+		}
+		stealerDetailsBytes, err := json.Marshal(stealerDetails)
+		if err != nil {
+			slog.Error("Failed to marshal stealerDetails", "error", err)
+			msg.Nak()
+		}
+		// Mark with stealerUUID in KV by this stealer
+		_, err = kv.Update(kvKey, stealerDetailsBytes, entry.Revision())
+		if err != nil && !errors.Is(err, nats.ErrKeyExists) {
+			slog.Error("Failed to put value in KV bucket: ", "error", err)
+			msg.Nak()
+		}
+
+		// Acknowledge JetStream message
+		msg.Ack()
 
 	})
 	select {}
@@ -290,10 +307,8 @@ func CreateService(cli *kubernetes.Clientset, pod corev1.Pod, donorUUID string, 
 		slog.Info("No ports are exposed in the Pod", "pod", pod)
 		return nil, nil
 	}
-	sName, ok := pod.Labels["serviceName"]
-	if !ok {
-		sName = pod.Name + "-service"
-	}
+
+	sName := common.GenerateServiceNameForStolenPod(pod.Name)
 	sNamespace := pod.Namespace
 
 	service := &corev1.Service{
@@ -318,64 +333,6 @@ func CreateService(cli *kubernetes.Clientset, pod corev1.Pod, donorUUID string, 
 	slog.Info("Successfully created Service", "service", createdService)
 	return createdService, nil
 }
-
-// func ExportService(K8SConfig *rest.Config, service *corev1.Service) (*apiextensionsv1.CustomResourceDefinition, error) {
-// 	// Create a new scheme and register the Submariner types
-// 	sch := runtime.NewScheme()
-// 	err := scheme.AddToScheme(sch)
-// 	if err != nil {
-// 		slog.Error("Failed to add Submariner types to scheme", "error", err)
-// 	}
-
-// 	// Create a Kubernetes client
-// 	k8sClient, err := client.New(K8SConfig, client.Options{Scheme: scheme.Scheme})
-// 	if err != nil {
-// 		slog.Error("Error creating Kubernetes client", "error", err)
-// 		return nil, err
-// 	}
-
-// 	// Define the ServiceExport object
-// 	serviceExport := &apiextensionsv1.CustomResourceDefinition{
-// 		ObjectMeta: metav1.ObjectMeta{
-// 			Name:      "serviceexports.submariner.io",
-// 			Namespace: service.Namespace,
-// 		},
-// 		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
-// 			Group: "submariner.io",
-// 			Names: apiextensionsv1.CustomResourceDefinitionNames{
-// 				Kind:     "ServiceExport",
-// 				Plural:   "serviceexports",
-// 				Singular: "serviceexport",
-// 			},
-// 			Scope: apiextensionsv1.NamespaceScoped,
-// 			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
-// 				{
-// 					Name:    "v1alpha1",
-// 					Served:  true,
-// 					Storage: true,
-// 					Schema: &apiextensionsv1.CustomResourceValidation{
-// 						OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
-// 							Type: "object",
-// 							Properties: map[string]apiextensionsv1.JSONSchemaProps{
-// 								"spec": {
-// 									Type: "object",
-// 								},
-// 							},
-// 						},
-// 					},
-// 				},
-// 			},
-// 		},
-// 	}
-
-// 	// Create the ServiceExport in the cluster
-// 	err = k8sClient.Create(context.TODO(), serviceExport)
-// 	if err != nil {
-// 		slog.Error("Failed to create ServiceExport", "error", err)
-// 		return nil, err
-// 	}
-// 	return serviceExport, nil
-// }
 
 func checkForAnyFailuresOrRestarts(cli *kubernetes.Clientset, pod *corev1.Pod, kv nats.KeyValue, pollKVKey string, timeoutInMin int) error {
 	// Start polling the KV store for status updates

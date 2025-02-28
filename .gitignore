@@ -26,7 +26,7 @@ go.work.sum
 
 #others
 certs/
-./subj.txt
+subj.txt
 workloaddonor
 workloadstealer
 broker-info-decoded.subm

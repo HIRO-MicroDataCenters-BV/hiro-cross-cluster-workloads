@@ -1,0 +1,95 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: submariner-cleanup-sa
+  namespace: submariner-k8s-broker
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: submariner-cleanup-clusterrole
+rules:
+- apiGroups: ["submariner.io"]  # Core API group
+  resources: ["clusters", "endpoints", "gateways", "connections"]
+  verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+- apiGroups: ["multicluster.x-k8s.io"]
+  resources: ["serviceexports", "status"]
+  verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: submariner-cleanup-clusterrolebinding
+subjects:
+- kind: ServiceAccount
+  name: submariner-cleanup-sa
+  namespace: submariner-k8s-broker
+roleRef:
+  kind: ClusterRole
+  name: submariner-cleanup-clusterrole
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: submariner-cleanup
+  namespace: submariner-k8s-broker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: submariner-cleanup
+  template:
+    metadata:
+      labels:
+        app: submariner-cleanup
+    spec:
+      serviceAccountName: submariner-cleanup-sa
+      containers:
+      - name: submariner-cleanup
+        image: bitnami/kubectl:latest
+        command:
+          - /bin/sh
+          - -c
+          - |
+            while true; do
+              echo "Checking for unhealthy clusters..."
+              
+              # Get all clusters with their connection status
+              gateway_status_cluster_cable=$(kubectl get gateway -n submariner-operator -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{range .status.connections[*]}{.status}{"\t"}{.endpoint.cluster_id}{"\t"}{.endpoint.cable_name}{"\n"}{end}{end}')
+
+              if [ -z "$gateway_status_cluster_cable" ] || [ $(echo "$gateway_status_cluster_cable" | awk '{print NF}') -ne 4 ]; then   
+                echo "No clusters found or no status available."
+                sleep 10
+                continue
+              fi
+              echo "$gateway_status_cluster_cable"
+
+              echo "$gateway_status_cluster_cable" | while read -r gateway status cluster cable; do
+                retries=0
+                while [ "$status" != "connected" ] && [ $retries -lt 3 ]; do    
+                  echo "Cluster $cluster is unhealthy ($status). Retrying... ($((retries+1))/3)"
+                  sleep 5
+                  status=$(kubectl get gateway -n submariner-operator -o jsonpath="{range .items[*].status.connections[?(@.endpoint.cluster_id=='$cluster')]}{.status}{end}")
+                  retries=$((retries+1))
+                done
+
+                if [ "$status" != "connected" ]; then
+                  echo "Cluster $cluster is still unhealthy ($status) after 3 retries. Removing..."
+                  kubectl delete cluster.submariner.io "$cluster" -n submariner-k8s-broker --ignore-not-found
+                  kubectl delete endpoints.submariner.io "$cluster"-"$cable" -n submariner-k8s-broker --ignore-not-found
+                else
+                  echo "Cluster $cluster is healthy."
+                fi    done
+
+              echo "Waiting 10 seconds before next check..."
+              sleep 10
+            done
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "32Mi"
+          limits:
+            cpu: "200m"
+            memory: "128Mi"

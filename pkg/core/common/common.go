@@ -37,6 +37,12 @@ type DonorDetails struct {
 	WaitTime  int    `json:"waitTime"`
 }
 
+type StealerDetails struct {
+	StealerUUID  string   `json:"stealerUUID"`
+	KVKey        string   `json:"kvKey"`
+	ExposedFQDNs []string `json:"exposedFQDNs"`
+}
+
 type DonorPod struct {
 	DonorDetails DonorDetails `json:"donorDetails"`
 	Pod          *corev1.Pod  `json:"pod"`
@@ -138,6 +144,10 @@ func IsLabelExists(obj metav1.Object, label string) bool {
 		return false
 	}
 	return true
+}
+
+func GenerateServiceNameForStolenPod(podName string) string {
+	return podName + "-service"
 }
 
 func GenerateKVKey(input ...string) string {
