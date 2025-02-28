@@ -110,22 +110,15 @@ func (v *validator) mutateResourceWrapper(resource runtime.Object) *admission.Ad
 		resourceName = resourceObj.Name
 		resourceNamespace = resourceObj.Namespace
 		labels = resourceObj.Labels
-		isNotEligibleToSteal = common.IsLabelExists(resourceObj, v.vconfig.LableToFilter)
+		isNotEligibleToSteal = common.IsLabelExists(resourceObj, v.vconfig.LableToFilter) || common.IsLabelExists(resourceObj, common.StolenPodFailedLable)
 		resourceType = "Pod"
 	case *batchv1.Job:
 		resourceName = resourceObj.Name
 		resourceNamespace = resourceObj.Namespace
 		labels = resourceObj.Labels
-		isNotEligibleToSteal = common.IsLabelExists(resourceObj, v.vconfig.LableToFilter)
+		isNotEligibleToSteal = common.IsLabelExists(resourceObj, v.vconfig.LableToFilter) || common.IsLabelExists(resourceObj, common.StolenPodFailedLable)
 		resourceType = "Job"
 	default:
-		return &admission.AdmissionResponse{Allowed: true}
-	}
-
-	// Check if the resource has already been processed
-	_, exists := labels[common.StolenPodFailedLable]
-	if exists {
-		slog.Info(fmt.Sprintf("%s has already been processed", resourceType), "name", resourceName, "namespace", resourceNamespace)
 		return &admission.AdmissionResponse{Allowed: true}
 	}
 
@@ -210,7 +203,7 @@ func InformAboutResource(resource runtime.Object, vconfig donor.DVConfig, js nat
 	switch resourceObj := resource.(type) {
 	case *corev1.Pod:
 		resourceObj.Labels["donorUUID"] = vconfig.DonorUUID
-		resourceObj.Labels["serviceName"] = resourceObj.Name + "-service"
+		resourceObj.Labels["serviceName"] = common.GenerateServiceNameForStolenPod(resourceObj.Name)
 		donorPod := common.DonorPod{
 			DonorDetails: common.DonorDetails{
 				DonorUUID: vconfig.DonorUUID,
@@ -305,9 +298,13 @@ func mutateResource(resource runtime.Object, donorUUID string, stealerUUID strin
 		if modifiedPod.Labels == nil {
 			modifiedPod.Labels = make(map[string]string)
 		}
+		maps.Copy(modifiedPod.Labels, originalPod.Labels)
 		maps.Copy(modifiedPod.Labels, mutatePodLablesMap)
-		modifiedPod.Labels["donorUUID"] = donorUUID
-		modifiedPod.Labels["stealerUUID"] = stealerUUID
+		maps.Copy(modifiedPod.Labels, map[string]string{
+			"donorUUID":   donorUUID,
+			"stealerUUID": stealerUUID,
+		})
+		originalPod.Labels = map[string]string{}
 
 		originalJSON, err = json.Marshal(originalPod)
 		if err != nil {
@@ -335,9 +332,16 @@ func mutateResource(resource runtime.Object, donorUUID string, stealerUUID strin
 
 		// Modify spec selctor to make sure the job in pending state
 		modifiedJob.Spec.Selector = nil
-
-		modifiedJob.Labels["donorUUID"] = donorUUID
-		modifiedJob.Labels["stealerUUID"] = stealerUUID
+		if modifiedJob.Labels == nil {
+			modifiedJob.Labels = make(map[string]string)
+		}
+		maps.Copy(modifiedJob.Labels, originalJob.Labels)
+		maps.Copy(modifiedJob.Labels, mutatePodLablesMap)
+		maps.Copy(modifiedJob.Labels, map[string]string{
+			"donorUUID":   donorUUID,
+			"stealerUUID": stealerUUID,
+		})
+		modifiedJob.Labels = map[string]string{}
 
 		originalJSON, err = json.Marshal(originalJob)
 		if err != nil {
@@ -375,6 +379,7 @@ func mutateResource(resource runtime.Object, donorUUID string, stealerUUID strin
 			},
 		}
 	}
+	slog.Info("Created JSON Patch", "patch", patch)
 
 	// Marshal the patch to JSON
 	patchBytes, err := json.Marshal(patch)
@@ -419,7 +424,7 @@ func pollStolenPodStatus(kv nats.KeyValue, pollKVKey string, timeoutInMin int) e
 			slog.Error("Polling Timeout!", "timeout", timeoutInMin)
 			return fmt.Errorf("polling timeout, timeout: %d", timeoutInMin)
 		case update := <-watcher.Updates():
-			if update == nil {
+			if update == nil || update.Value() == nil || len(update.Value()) == 0 {
 				continue
 			}
 			value := update.Value()
@@ -439,4 +444,30 @@ func pollStolenPodStatus(kv nats.KeyValue, pollKVKey string, timeoutInMin int) e
 			}
 		}
 	}
+}
+
+func redeployMutatedPodWithStolenPodDetails(mutatedPod *corev1.Pod, kv nats.KeyValue, kvKey string) error {
+	var exposedFQDNs []string
+	for {
+		entry, err := kv.Get(kvKey)
+		if err != nil {
+			slog.Error("Failed to get value from KV store", "error", err, "key", kvKey)
+			return err
+		}
+		servingStealerDetails := common.StealerDetails{}
+		err = json.Unmarshal(entry.Value(), &servingStealerDetails)
+		if err != nil {
+			slog.Error("Failed to unmarshal servingStealerDetails", "error", err)
+			return err
+		}
+		exposedFQDNs := servingStealerDetails.ExposedFQDNs
+		if len(exposedFQDNs) != 0 {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	slog.Info("Got the exposed FQDNs", "exposedFQDNs", exposedFQDNs)
+	slog.Info("Redeploying the mutated pod with the stolen pod details", "mutatedPod", mutatedPod)
+	return nil
+
 }

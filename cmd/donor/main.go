@@ -15,7 +15,6 @@ import (
 	"hirocrossclusterworkloads/pkg/core/donor"
 	"hirocrossclusterworkloads/pkg/metrics"
 
-	"github.com/google/uuid"
 	"github.com/spf13/viper"
 )
 
@@ -34,8 +33,8 @@ func main() {
 
 	// To Do: Every restrat of the donor will have a new UUID.
 	// This logic has to be changed so that the UUID is persisted.
-	donorUUID := uuid.New().String()
-	// donorUUID := "b458a190-4744-46f4-b16b-2739cf9fccb8"
+	//donorUUID := uuid.New().String()
+	donorUUID := "b458a190-4744-46f4-b16b-2739cf9fccb8-donor"
 
 	slog.Info("Configuring Validator")
 	natsConfig := natsconnect.NATSClient{

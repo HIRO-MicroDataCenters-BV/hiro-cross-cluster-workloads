@@ -95,26 +95,52 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 
 		// Check if message is already processed
 		entry, err := kv.Get(kvKey)
-		if err == nil && string(entry.Value()) != common.DonorKVValuePending {
-			servingStealerDetails := common.StealerDetails{}
-			err = json.Unmarshal(entry.Value(), &servingStealerDetails)
-			if err != nil {
-				slog.Error("Failed to unmarshal servingStealerDetails", "error", err)
-				msg.Nak()
-				return
-			}
-			otherStealerUUID := servingStealerDetails.StealerUUID
-			if otherStealerUUID == stealerUUID {
-				slog.Info("Skipping Pod, I am already processed it", "podName", pod.Name,
-					"podNamespace", pod.Namespace, "stealerUUID", stealerUUID)
-				StealPod(c.K8SCli, pod, donorUUID, stealerUUID)
-				msg.Ack()
-			} else {
-				slog.Info("Skipping Pod, already processed by another stealer", "podName", pod.Name,
-					"podNamespace", pod.Namespace, "otherStealerUUID", otherStealerUUID)
-			}
+		if err != nil {
+			slog.Error("Failed to get value from KV bucket", "error", err)
+			msg.Nak()
+			return
+
+		}
+		servingStealerDetails := common.StealerDetails{}
+		err = json.Unmarshal(entry.Value(), &servingStealerDetails)
+		if err != nil {
+			slog.Error("Failed to unmarshal servingStealerDetails", "error", err)
+			msg.Nak()
 			return
 		}
+		otherStealerUUID := servingStealerDetails.StealerUUID
+		if otherStealerUUID == common.DonorKVValuePending {
+			slog.Info("I can process the Pod", "podName", pod.Name,
+				"podNamespace", pod.Namespace, "stealerUUID", stealerUUID)
+		} else if otherStealerUUID == stealerUUID {
+			slog.Info("Skipping Pod, I am already processed it", "podName", pod.Name,
+				"podNamespace", pod.Namespace, "stealerUUID", stealerUUID)
+			StealPod(c.K8SCli, pod, donorUUID, stealerUUID)
+			msg.Ack()
+			return
+		} else {
+			slog.Info("Skipping Pod, already processed by another stealer", "podName", pod.Name,
+				"podNamespace", pod.Namespace, "otherStealerUUID", otherStealerUUID)
+			return
+		}
+
+		servingStealerDetails.StealerUUID = stealerUUID
+		servingStealerDetails.KVKey = kvKey
+
+		servingStealerDetailsBytes, err := json.Marshal(servingStealerDetails)
+		if err != nil {
+			slog.Error("Failed to marshal servingStealerDetails", "error", err)
+			msg.Nak()
+		}
+		// Mark with stealerUUID in KV by this stealer
+		_, err = kv.Update(kvKey, servingStealerDetailsBytes, entry.Revision())
+		if err != nil && !errors.Is(err, nats.ErrKeyExists) {
+			slog.Error("Failed to update value in KV bucket: ", "error", err)
+			msg.Nak()
+		}
+
+		// Acknowledge JetStream message
+		msg.Ack()
 
 		createdPod, err := StealPod(c.K8SCli, pod, donorUUID, stealerUUID)
 		if err != nil {
@@ -122,6 +148,7 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 			msg.Nak()
 		}
 		slog.Info("Successfully stole the Pod", "pod", createdPod)
+
 		metrics.StealerClaimedTasksTotal.WithLabelValues(stealerUUID).Inc()
 		metrics.StolenTasksTotal.WithLabelValues(donorUUID, stealerUUID).Inc()
 
@@ -156,25 +183,17 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 		}
 		slog.Info("Access the service with the FQDN", "service", service, "fqdns", fqdns)
 
-		stealerDetails := common.StealerDetails{
-			StealerUUID:  stealerUUID,
-			KVKey:        kvKey,
-			ExposedFQDNs: fqdns,
-		}
-		stealerDetailsBytes, err := json.Marshal(stealerDetails)
+		servingStealerDetails.ExposedFQDNs = fqdns
+		servingStealerDetailsBytes, err = json.Marshal(servingStealerDetails)
 		if err != nil {
-			slog.Error("Failed to marshal stealerDetails", "error", err)
+			slog.Error("Failed to marshal servingStealerDetails", "error", err)
 			msg.Nak()
 		}
 		// Mark with stealerUUID in KV by this stealer
-		_, err = kv.Update(kvKey, stealerDetailsBytes, entry.Revision())
+		_, err = kv.Update(kvKey, servingStealerDetailsBytes, entry.Revision())
 		if err != nil && !errors.Is(err, nats.ErrKeyExists) {
-			slog.Error("Failed to put value in KV bucket: ", "error", err)
-			msg.Nak()
+			slog.Error("Failed to update value in KV bucket: ", "error", err)
 		}
-
-		// Acknowledge JetStream message
-		msg.Ack()
 
 	})
 	select {}
@@ -303,8 +322,8 @@ func CreateService(cli *kubernetes.Clientset, pod corev1.Pod, donorUUID string, 
 			})
 		}
 	}
-	if ports != nil || len(ports) == 0 {
-		slog.Info("No ports are exposed in the Pod", "pod", pod)
+	if ports != nil && len(ports) == 0 {
+		slog.Info("No ports are exposed in the Pod", "pod", pod, "ports", ports)
 		return nil, nil
 	}
 

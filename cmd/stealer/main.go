@@ -13,7 +13,6 @@ import (
 	"hirocrossclusterworkloads/pkg/core/stealer"
 	"hirocrossclusterworkloads/pkg/metrics"
 
-	"github.com/google/uuid"
 	"github.com/spf13/viper"
 )
 
@@ -27,7 +26,8 @@ func main() {
 
 	// To Do: Every restrat of the worker will have a new UUID.
 	// This logic has to be changed so that the UUID will never change.
-	stealerUUID := uuid.New().String()
+	//stealerUUID := uuid.New().String()
+	stealerUUID := "8b5ff588-ef41-4c69-ab1b-7b03f1bfc0e0-stealer"
 
 	slog.Info("Configuring Worker")
 	natsConfig := natsconnect.NATSClient{
