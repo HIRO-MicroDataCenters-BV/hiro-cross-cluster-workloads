@@ -9,7 +9,7 @@ webhooks:
       matchExpressions:
         - key: kubernetes.io/metadata.name
           operator: NotIn
-          values: [ "default", "kube-system", "local-path-storage", "hiro", ]
+          values: [ "default", "kube-system", "local-path-storage", "hiro", "submariner-k8s-broker", "submariner-operator"]
     rules:
       - operations: [ "CREATE"]
         apiGroups: [ "" ]

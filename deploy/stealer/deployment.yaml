@@ -62,7 +62,7 @@ spec:
           - name: WORK_LOAD_STEAL_LABLE
             value: "WorkLoadSteal"  
           - name: IGNORE_NAMESPACES
-            value: "default,kube-system,local-path-storage,hiro"
+            value: "default,kube-system,local-path-storage,submariner-k8s-broker,submariner-operator,hiro"
           - name: METRICS_PORT
             value: "9091"  
           - name: METRICS_PATH

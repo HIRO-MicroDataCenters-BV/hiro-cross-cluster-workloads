@@ -71,12 +71,17 @@ func (n *notify) Start(stopChan chan<- bool) error {
 				continue
 			}
 
+			allLabelsExist := true
 			for label := range common.StolenPodLablesMap {
 				_, ok := pod.Labels[label]
 				if !ok {
+					allLabelsExist = false
 					slog.Info("Ignoring as Pod is not stolen one", "namespace", pod.Namespace, "name", pod.Name)
-					continue
+					break
 				}
+			}
+			if !allLabelsExist {
+				continue
 			}
 
 			slog.Info("Pod is stolen one, publishing results to NATS", "subject", nsubject,
