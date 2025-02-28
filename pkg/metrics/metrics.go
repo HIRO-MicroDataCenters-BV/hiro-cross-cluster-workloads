@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -71,6 +72,7 @@ func StartDonorMetricsServer(mPath string, mPort string) {
 		mPort = ":" + mPath
 	}
 	http.Handle(mPath, promhttp.Handler())
+	slog.Info("Starting donor Prometheus metrics server", "path", mPath, "port", mPort)
 	go http.ListenAndServe(mPort, nil)
 }
 
@@ -84,5 +86,6 @@ func StartStealerMetricsServer(mPath string, mPort string) {
 		mPort = ":" + mPath
 	}
 	http.Handle(mPath, promhttp.Handler())
+	slog.Info("Starting stealer Prometheus metrics server", "path", mPath, "port", mPort)
 	go http.ListenAndServe(mPort, nil)
 }
