@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hiroworkstealfinish
+  labels:
+    environment: dev
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: busybox-pod
+  namespace: hiroworkstealfinish
+  labels:
+    app: busybox
+spec:
+  containers:
+  - name: busybox-container
+    image: busybox:latest
+    command: ['sh', '-c', 'echo "Hello, Kubernetes!" && sleep 30'] 

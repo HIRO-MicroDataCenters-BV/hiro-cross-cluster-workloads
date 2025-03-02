@@ -43,6 +43,9 @@ func ExportService(K8SConfig *rest.Config, service *corev1.Service) (*ServiceExp
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      service.Name,
 			Namespace: service.Namespace,
+			Annotations: map[string]string{
+				"submariner.io/allow-clusters": "kind-donor",
+			},
 		},
 		Spec: ServiceExportSpec{},
 	}

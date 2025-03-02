@@ -1,6 +1,7 @@
 package common
 
 import (
+	"log/slog"
 	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -8,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -160,4 +162,20 @@ func GenerateStealWorkloadKVKey(donorUUID, namespace, podName string) string {
 
 func GeneratePollStealWorkloadKVKey(donorUUID, stealerUUID, namespace, podName string) string {
 	return GenerateKVKey(donorUUID, stealerUUID, namespace, podName)
+}
+
+func PodExposedPorts(pod *corev1.Pod) []corev1.ServicePort {
+	var ports []corev1.ServicePort
+	for _, container := range pod.Spec.Containers {
+		for _, port := range container.Ports {
+			ports = append(ports, corev1.ServicePort{
+				Name:       port.Name,
+				Protocol:   port.Protocol,
+				Port:       port.ContainerPort,
+				TargetPort: intstr.FromInt(int(port.ContainerPort)),
+			})
+		}
+	}
+	slog.Info("Pod Exposed Ports", "ports", ports)
+	return ports
 }

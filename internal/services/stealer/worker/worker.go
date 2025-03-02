@@ -16,7 +16,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -135,7 +134,7 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 		// Mark with stealerUUID in KV by this stealer
 		_, err = kv.Update(kvKey, servingStealerDetailsBytes, entry.Revision())
 		if err != nil && !errors.Is(err, nats.ErrKeyExists) {
-			slog.Error("Failed to update value in KV bucket: ", "error", err)
+			slog.Error("Failed to update value in KV bucket with stealerUUID: ", "error", err)
 			msg.Nak()
 		}
 
@@ -153,10 +152,10 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 		metrics.StolenTasksTotal.WithLabelValues(donorUUID, stealerUUID).Inc()
 
 		// Watch the created pod for every 5 sec and send it status to donor
-		go func() {
-			pollKVKey := common.GeneratePollStealWorkloadKVKey(donorUUID, stealerUUID, pod.Namespace, pod.Name)
-			checkForAnyFailuresOrRestarts(c.K8SCli, createdPod, kv, pollKVKey, waitTime)
-		}()
+		// go func() {
+		// 	pollKVKey := common.GeneratePollStealWorkloadKVKey(donorUUID, stealerUUID, pod.Namespace, pod.Name)
+		// 	checkForAnyFailuresOrRestarts(c.K8SCli, createdPod, kv, pollKVKey, waitTime)
+		// }()
 
 		// Exposing the stolen Pod ports via a Service
 		service, err := CreateService(c.K8SCli, *createdPod, donorUUID, stealerUUID)
@@ -187,13 +186,27 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 		servingStealerDetailsBytes, err = json.Marshal(servingStealerDetails)
 		if err != nil {
 			slog.Error("Failed to marshal servingStealerDetails", "error", err)
-			msg.Nak()
+			return
 		}
-		// Mark with stealerUUID in KV by this stealer
-		_, err = kv.Update(kvKey, servingStealerDetailsBytes, entry.Revision())
-		if err != nil && !errors.Is(err, nats.ErrKeyExists) {
-			slog.Error("Failed to update value in KV bucket: ", "error", err)
+		// Mark with servingStealerDetails in KV by this stealer
+		for retries := 3; retries > 0; retries-- {
+			_, err = kv.Update(kvKey, servingStealerDetailsBytes, entry.Revision())
+			if err == nil {
+				slog.Info("Successfully updated the KV bucket with exposed FQDNs", "fqdns", fqdns)
+				break
+			}
+			if errors.Is(err, nats.ErrKeyExists) {
+				entry, err = kv.Get(kvKey)
+				if err != nil {
+					slog.Error("Failed to get updated value from KV bucket", "error", err)
+					return
+				}
+				continue
+			}
+			slog.Error("Failed to update value in KV bucket with FQDNs: ", "error", err)
+			return
 		}
+		slog.Info("Successfully updated the KV bucket with exposed FQDNs", "fqdns", fqdns)
 
 	})
 	select {}
@@ -311,18 +324,8 @@ func isPodSuccesfullyRunning(clientset *kubernetes.Clientset, namespace, name st
 }
 
 func CreateService(cli *kubernetes.Clientset, pod corev1.Pod, donorUUID string, stealerUUID string) (*corev1.Service, error) {
-	var ports []corev1.ServicePort
-	for _, container := range pod.Spec.Containers {
-		for _, port := range container.Ports {
-			ports = append(ports, corev1.ServicePort{
-				Name:       port.Name,
-				Protocol:   port.Protocol,
-				Port:       port.ContainerPort,
-				TargetPort: intstr.FromInt(int(port.ContainerPort)),
-			})
-		}
-	}
-	if ports != nil && len(ports) == 0 {
+	ports := common.PodExposedPorts(&pod)
+	if len(ports) == 0 {
 		slog.Info("No ports are exposed in the Pod", "pod", pod, "ports", ports)
 		return nil, nil
 	}

@@ -9,6 +9,7 @@ import (
 	"hirocrossclusterworkloads/pkg/metrics"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,8 +39,8 @@ var (
 )
 
 type validator struct {
-	vconfig donor.DVConfig
-	cli     *kubernetes.Clientset
+	VConfig donor.DVConfig
+	K8Scli  *kubernetes.Clientset
 }
 
 func New(config donor.DVConfig) (donor.Validator, error) {
@@ -48,8 +49,8 @@ func New(config donor.DVConfig) (donor.Validator, error) {
 		return nil, err
 	}
 	return &validator{
-		cli:     clientset,
-		vconfig: config,
+		K8Scli:  clientset,
+		VConfig: config,
 	}, nil
 }
 
@@ -110,24 +111,24 @@ func (v *validator) mutateResourceWrapper(resource runtime.Object) *admission.Ad
 		resourceName = resourceObj.Name
 		resourceNamespace = resourceObj.Namespace
 		labels = resourceObj.Labels
-		isNotEligibleToSteal = common.IsLabelExists(resourceObj, v.vconfig.LableToFilter) || common.IsLabelExists(resourceObj, common.StolenPodFailedLable)
+		isNotEligibleToSteal = common.IsLabelExists(resourceObj, v.VConfig.LableToFilter) || common.IsLabelExists(resourceObj, common.StolenPodFailedLable)
 		resourceType = "Pod"
 	case *batchv1.Job:
 		resourceName = resourceObj.Name
 		resourceNamespace = resourceObj.Namespace
 		labels = resourceObj.Labels
-		isNotEligibleToSteal = common.IsLabelExists(resourceObj, v.vconfig.LableToFilter) || common.IsLabelExists(resourceObj, common.StolenPodFailedLable)
+		isNotEligibleToSteal = common.IsLabelExists(resourceObj, v.VConfig.LableToFilter) || common.IsLabelExists(resourceObj, common.StolenPodFailedLable)
 		resourceType = "Job"
 	default:
 		return &admission.AdmissionResponse{Allowed: true}
 	}
 
 	if isNotEligibleToSteal {
-		slog.Info(fmt.Sprintf("%s is not eligible to steal as it has the label", resourceType), "name", resourceName, "label", v.vconfig.LableToFilter)
+		slog.Info(fmt.Sprintf("%s is not eligible to steal as it has the label", resourceType), "name", resourceName, "label", v.VConfig.LableToFilter)
 		return &admission.AdmissionResponse{Allowed: true}
 	}
 
-	ignoreNamespaces := v.vconfig.IgnoreNamespaces
+	ignoreNamespaces := v.VConfig.IgnoreNamespaces
 	slog.Info(fmt.Sprintf("%s create event", resourceType), "namespace", resourceNamespace, "name", resourceName)
 	uniqueIgnoredNamespaces := common.MergeUnique(ignoreNamespaces, common.K8SNamespaces)
 	if common.IsItIgnoredNamespace(uniqueIgnoredNamespaces, resourceNamespace) {
@@ -135,14 +136,16 @@ func (v *validator) mutateResourceWrapper(resource runtime.Object) *admission.Ad
 		return nil
 	}
 
-	natsConnect, js, kv, err := v.vconfig.Nconfig.GetNATSConnectJetStreamAndKeyValue()
+	slog.Info("Mutate the resource", "name", resourceName, "namespace", resourceNamespace, "resourceType", resourceType, "labels", labels)
+
+	natsConnect, js, kv, err := v.VConfig.Nconfig.GetNATSConnectJetStreamAndKeyValue()
 	if err != nil {
 		slog.Error("Failed to connect to NATS/JS/KV", "error", err, "natsConnect", natsConnect, "js", js, "kv", kv)
 		return &admission.AdmissionResponse{Allowed: true}
 	}
 
-	kvKey := common.GenerateStealWorkloadKVKey(v.vconfig.DonorUUID, resourceNamespace, resourceName)
-	stealerUUID, err := InformAboutResource(resource, v.vconfig, js, kv, kvKey)
+	kvKey := common.GenerateStealWorkloadKVKey(v.VConfig.DonorUUID, resourceNamespace, resourceName)
+	stealerUUID, err := InformAboutResource(resource, v.VConfig, js, kv, kvKey)
 	if err != nil && stealerUUID == "" {
 		slog.Warn(fmt.Sprintf("Failed to make the %s to be stolen", resourceType), "name", resourceName, "namespace", resourceNamespace, "error", err)
 		return &admission.AdmissionResponse{Allowed: true}
@@ -150,30 +153,15 @@ func (v *validator) mutateResourceWrapper(resource runtime.Object) *admission.Ad
 	slog.Info(fmt.Sprintf("%s got stolen", resourceType), "name", resourceName, "namespace", resourceNamespace, "stealerUUID", stealerUUID)
 
 	go func() {
-		pollKVKey := common.GeneratePollStealWorkloadKVKey(v.vconfig.DonorUUID, stealerUUID, resourceNamespace, resourceName)
-		err := pollStolenPodStatus(kv, pollKVKey, pollWaitTimeInMin)
-		if err != nil {
-			slog.Error(fmt.Sprintf("Failed to poll stolen %s status", resourceType), "error", err)
-
-			// Create the resource again by adding a label
-			labels[common.StolenPodFailedLable] = "true"
-			slog.Info(fmt.Sprintf("Creating the %s here itself", resourceType), "name", resourceName, "namespace", resourceNamespace)
-			var createErr error
-			switch resourceObj := resource.(type) {
-			case *corev1.Pod:
-				_, createErr = v.cli.CoreV1().Pods(resourceNamespace).Create(context.TODO(), resourceObj, metav1.CreateOptions{})
-			case *batchv1.Job:
-				_, createErr = v.cli.BatchV1().Jobs(resourceNamespace).Create(context.TODO(), resourceObj, metav1.CreateOptions{})
-			}
-			if createErr != nil {
-				slog.Error(fmt.Sprintf("Failed to create %s", resourceType), "error", createErr)
-			} else {
-				slog.Info(fmt.Sprintf("Successfully created %s", resourceType), "name", resourceName, "namespace", resourceNamespace)
-			}
-		}
+		// pollKVKey := common.GeneratePollStealWorkloadKVKey(v.VConfig.DonorUUID, stealerUUID, resourceNamespace, resourceName)
+		// err := pollStolenPodStatus(kv, pollKVKey, pollWaitTimeInMin)
+		// if err != nil {
+		// 	slog.Error(fmt.Sprintf("Failed to poll stolen %s status", resourceType), "error", err)
+		// 	createResourceWithLabel(resource, resourceType, resourceName, resourceNamespace, labels, v.K8Scli)
+		// }
 	}()
 
-	return mutateResource(resource, v.vconfig.DonorUUID, stealerUUID)
+	return v.mutateResource(resource, kv, kvKey, stealerUUID)
 }
 
 func InformAboutResource(resource runtime.Object, vconfig donor.DVConfig, js nats.JetStreamContext,
@@ -273,9 +261,10 @@ func WaitToGetResourceStolen(waitTime int, kv nats.KeyValue, kvKey string, vconf
 	return "", fmt.Errorf("no stealer is ready to steale within the wait time %d for donorUUID: %s", waitTime, vconfig.DonorUUID)
 }
 
-func mutateResource(resource runtime.Object, donorUUID string, stealerUUID string) *admission.AdmissionResponse {
+func (v *validator) mutateResource(resource runtime.Object, kv nats.KeyValue, kvKey string, stealerUUID string) *admission.AdmissionResponse {
 	var originalJSON, modifiedJSON []byte
 	var err error
+	var donorUUID = v.VConfig.DonorUUID
 
 	switch resourceObj := resource.(type) {
 	case *corev1.Pod:
@@ -325,6 +314,8 @@ func mutateResource(resource runtime.Object, donorUUID string, stealerUUID strin
 				},
 			}
 		}
+
+		go redeployMutatedPodWithStolenPodDetails(modifiedPod, *v.K8Scli, kv, kvKey)
 
 	case *batchv1.Job:
 		originalJob := resourceObj.DeepCopy()
@@ -436,19 +427,42 @@ func pollStolenPodStatus(kv nats.KeyValue, pollKVKey string, timeoutInMin int) e
 			slog.Info("Pod Poll details", "pollDetails", pollDetails)
 
 			if pollDetails.Status == common.PodFinishedStatus {
-				fmt.Println("Pod Processing Completed!")
+				slog.Info("Pod Processing Completed!")
 				return nil
 			} else if pollDetails.Status == common.PodFailedStatus {
-				fmt.Println("Pod Processing Failed!")
+				slog.Info("Pod Processing Failed!")
 				return fmt.Errorf("pod processing failed")
 			}
 		}
 	}
 }
 
-func redeployMutatedPodWithStolenPodDetails(mutatedPod *corev1.Pod, kv nats.KeyValue, kvKey string) error {
+func createResourceWithLabel(resource runtime.Object, resourceType, resourceName, resourceNamespace string, labels map[string]string, k8scli *kubernetes.Clientset) error {
+	labels[common.StolenPodFailedLable] = "true"
+	slog.Info(fmt.Sprintf("Creating the %s here itself", resourceType), "name", resourceName, "namespace", resourceNamespace)
+	var createErr error
+	switch resourceObj := resource.(type) {
+	case *corev1.Pod:
+		_, createErr = k8scli.CoreV1().Pods(resourceNamespace).Create(context.TODO(), resourceObj, metav1.CreateOptions{})
+	case *batchv1.Job:
+		_, createErr = k8scli.BatchV1().Jobs(resourceNamespace).Create(context.TODO(), resourceObj, metav1.CreateOptions{})
+	}
+	if createErr != nil {
+		slog.Error(fmt.Sprintf("Failed to create %s", resourceType), "error", createErr)
+		return createErr
+	}
+	slog.Info(fmt.Sprintf("Successfully created %s", resourceType), "name", resourceName, "namespace", resourceNamespace)
+	return nil
+}
+
+func redeployMutatedPodWithStolenPodDetails(mutatedPod *corev1.Pod, k8scli kubernetes.Clientset, kv nats.KeyValue, kvKey string) error {
+	ports := common.PodExposedPorts(mutatedPod)
+	if len(ports) == 0 {
+		slog.Info("No ports are exposed in the Pod", "pod", mutatedPod, "ports", ports)
+		return nil
+	}
 	var exposedFQDNs []string
-	for {
+	for timeInSec := 0; timeInSec < 60; timeInSec++ {
 		entry, err := kv.Get(kvKey)
 		if err != nil {
 			slog.Error("Failed to get value from KV store", "error", err, "key", kvKey)
@@ -460,14 +474,28 @@ func redeployMutatedPodWithStolenPodDetails(mutatedPod *corev1.Pod, kv nats.KeyV
 			slog.Error("Failed to unmarshal servingStealerDetails", "error", err)
 			return err
 		}
-		exposedFQDNs := servingStealerDetails.ExposedFQDNs
+		slog.Info("Got the servingStealerDetails", "servingStealerDetails", servingStealerDetails)
+		exposedFQDNs = servingStealerDetails.ExposedFQDNs
 		if len(exposedFQDNs) != 0 {
 			break
 		}
 		time.Sleep(1 * time.Second)
 	}
 	slog.Info("Got the exposed FQDNs", "exposedFQDNs", exposedFQDNs)
-	slog.Info("Redeploying the mutated pod with the stolen pod details", "mutatedPod", mutatedPod)
-	return nil
+	slog.Info("Adding to the mutated pod lables with the stolen pod access details", "mutatedPod", mutatedPod)
+	// Add label to mutatedPod with FQDNs
+	if mutatedPod.Labels == nil {
+		mutatedPod.Labels = make(map[string]string)
+	}
+	mutatedPod.Labels["FQDNs"] = strings.ReplaceAll(strings.Join(exposedFQDNs, ","), ":", "_")
 
+	// Update the pod with the new labels
+	_, err := k8scli.CoreV1().Pods(mutatedPod.Namespace).Update(context.TODO(), mutatedPod, metav1.UpdateOptions{})
+	if err != nil {
+		slog.Error("Failed to update the mutated pod with FQDNs label", "error", err)
+		return err
+	}
+	slog.Info("Successfully updated the mutated pod with FQDNs label", "pod", mutatedPod.Name, "namespace", mutatedPod.Namespace)
+
+	return nil
 }
