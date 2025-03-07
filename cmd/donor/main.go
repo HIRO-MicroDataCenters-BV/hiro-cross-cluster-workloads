@@ -12,6 +12,7 @@ import (
 	"hirocrossclusterworkloads/internal/services/donor/mutate"
 	results "hirocrossclusterworkloads/internal/services/donor/results"
 	natsconnect "hirocrossclusterworkloads/pkg/connector/nats"
+	"hirocrossclusterworkloads/pkg/core/common"
 	"hirocrossclusterworkloads/pkg/core/donor"
 	"hirocrossclusterworkloads/pkg/metrics"
 
@@ -34,7 +35,11 @@ func main() {
 	// To Do: Every restrat of the donor will have a new UUID.
 	// This logic has to be changed so that the UUID is persisted.
 	//donorUUID := uuid.New().String()
-	donorUUID := "b458a190-4744-46f4-b16b-2739cf9fccb8-donor"
+	//donorUUID := "b458a190-4744-46f4-b16b-2739cf9fccb8-donor"
+	donorUUID, err := common.GetClusterID()
+	if err != nil || donorUUID == "" {
+		log.Fatal("Failed to get cluster ID", donorUUID, err)
+	}
 
 	slog.Info("Configuring Validator")
 	natsConfig := natsconnect.NATSClient{

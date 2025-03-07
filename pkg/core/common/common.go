@@ -1,6 +1,7 @@
 package common
 
 import (
+	"context"
 	"log/slog"
 	"strings"
 
@@ -88,6 +89,21 @@ func GetK8sClientAndConfigSet() (*kubernetes.Clientset, *rest.Config, error) {
 	}
 
 	return clientset, config, err
+}
+
+func GetClusterID() (string, error) {
+	clientset, _, err := GetK8sClientAndConfigSet()
+	if err != nil {
+		return "", err
+	}
+	nodeList, err := clientset.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		return "", err
+	}
+	if len(nodeList.Items) == 0 {
+		return "", nil
+	}
+	return nodeList.Items[0].Status.NodeInfo.SystemUUID, nil
 }
 
 func MergeMaps(map1, map2 map[string]string) map[string]string {

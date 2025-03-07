@@ -170,7 +170,7 @@ func (c *Consume) Start(stopChan chan<- bool) error {
 		slog.Info("Successfully created Service", "service", service)
 
 		// Export the Service via Submariner
-		serviceExport, err := ExportService(c.K8SConfig, service)
+		serviceExport, err := ExportService(c.K8SConfig, service, donorUUID)
 		if err != nil {
 			slog.Error("Failed to export Service via submariner", "error", err)
 			return

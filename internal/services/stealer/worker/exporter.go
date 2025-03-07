@@ -13,7 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func ExportService(K8SConfig *rest.Config, service *corev1.Service) (*ServiceExport, error) {
+func ExportService(K8SConfig *rest.Config, service *corev1.Service, donorUUID string) (*ServiceExport, error) {
 	// Create a new scheme and register the Submariner types
 	sch := runtime.NewScheme()
 	err := scheme.AddToScheme(sch)
@@ -44,7 +44,7 @@ func ExportService(K8SConfig *rest.Config, service *corev1.Service) (*ServiceExp
 			Name:      service.Name,
 			Namespace: service.Namespace,
 			Annotations: map[string]string{
-				"submariner.io/allow-clusters": "kind-donor",
+				"submariner.io/allow-clusters": donorUUID,
 			},
 		},
 		Spec: ServiceExportSpec{},

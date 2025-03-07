@@ -495,7 +495,7 @@ func redeployMutatedPodWithStolenPodDetails(mutatedPod *corev1.Pod, k8scli kuber
 		slog.Error("Failed to update the mutated pod with FQDNs label", "error", err)
 		return err
 	}
-	slog.Info("Successfully updated the mutated pod with FQDNs label", "pod", mutatedPod.Name, "namespace", mutatedPod.Namespace)
+	slog.Info("Successfully updated the mutated pod with FQDNs label", "pod", mutatedPod.Name, "namespace", mutatedPod.Namespace, "labels", mutatedPod.Labels)
 
 	return nil
 }
