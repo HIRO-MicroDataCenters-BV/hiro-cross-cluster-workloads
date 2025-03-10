@@ -565,7 +565,7 @@ func redeployMutatedResourceWithStolenDetails(resource runtime.Object, k8scli ku
 		slog.Info("Successfully updated the mutated deployment with FQDNs label", "deployment", resourceObj.Name, "namespace", resourceObj.Namespace, "labels", resourceObj.Labels)
 	default:
 		slog.Warn("Unsupported resource type", "resource", resource)
-		return fmt.Errorf("unsupported resource type")
+		return fmt.Errorf("redeployMutatedResourceWithStolenDetails: unsupported resource type")
 	}
 
 	return nil
