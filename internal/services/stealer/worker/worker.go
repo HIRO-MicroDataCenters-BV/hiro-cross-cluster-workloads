@@ -165,14 +165,15 @@ func (c *Consume) InputMsgHandler(msg *nats.Msg, kv nats.KeyValue) {
 	// 	checkForAnyFailuresOrRestarts(c.K8SCli, createdPod, kv, pollKVKey, waitTime)
 	// }()
 
-	fqdns, err := ExposeServiceAndExportViaSubmariner(c.K8SCli, c.K8SConfig, &createdResource, donorUUID, stealerUUID)
+	fqdn, ports, err := ExposeServiceAndExportViaSubmariner(c.K8SCli, c.K8SConfig, &createdResource, donorUUID, stealerUUID)
 	if err != nil {
 		slog.Error("Failed to expose Service and export via submariner", "error", err)
 		return
 	}
-	slog.Info("Successfully exposed Service and exported via submariner", "fqdns", fqdns)
+	slog.Info("Successfully exposed a Service and exported via submariner", "fqdn", fqdn, "ports", ports)
 
-	servingStealerDetails.ExposedFQDNs = fqdns
+	servingStealerDetails.ExposedFQDN = fqdn
+	servingStealerDetails.ExposedPorts = ports
 	servingStealerDetailsBytes, err = json.Marshal(servingStealerDetails)
 	if err != nil {
 		slog.Error("Failed to marshal servingStealerDetails", "error", err)
@@ -182,7 +183,7 @@ func (c *Consume) InputMsgHandler(msg *nats.Msg, kv nats.KeyValue) {
 	for retries := 3; retries > 0; retries-- {
 		_, err = kv.Update(kvKey, servingStealerDetailsBytes, entry.Revision())
 		if err == nil {
-			slog.Info("Successfully updated the KV bucket with exposed FQDNs", "fqdns", fqdns)
+			slog.Info("Successfully updated the KV bucket with exposed FQDNs", "fqdn", fqdn, "ports", ports)
 			break
 		}
 		if errors.Is(err, nats.ErrKeyExists) {
@@ -193,10 +194,10 @@ func (c *Consume) InputMsgHandler(msg *nats.Msg, kv nats.KeyValue) {
 			}
 			continue
 		}
-		slog.Error("Failed to update value in KV bucket with FQDNs: ", "error", err)
+		slog.Error("Failed to update value in KV bucket with FQDN: ", "error", err)
 		return
 	}
-	slog.Info("Successfully updated the KV bucket with exposed FQDNs", "fqdns", fqdns)
+	slog.Info("Successfully updated the KV bucket with exposed FQDN", "fqdn", fqdn, "ports", ports)
 }
 
 func StealResource(cli *kubernetes.Clientset, resource runtime.Object, donorUUID string, stealerUUID string) (runtime.Object, error) {
@@ -392,16 +393,16 @@ func isResourceSuccessfullyRunning(clientset *kubernetes.Clientset, namespace, n
 }
 
 func ExposeServiceAndExportViaSubmariner(K8SCli *kubernetes.Clientset, K8SConfig *rest.Config,
-	resource *runtime.Object, donorUUID string, stealerUUID string) ([]string, error) {
+	resource *runtime.Object, donorUUID string, stealerUUID string) (string, []int, error) {
 	// Exposing the stolen Pod ports via a Service
 	service, err := CreateService(K8SCli, *resource, donorUUID, stealerUUID)
 	if err != nil {
 		slog.Error("Failed to create Service", "error", err)
-		return nil, err
+		return "", nil, err
 	}
 	if service == nil {
 		slog.Info("No ports are exposed in the resource", "resource", resource)
-		return nil, err
+		return "", nil, err
 	}
 	slog.Info("Successfully created Service", "service", service)
 
@@ -409,15 +410,16 @@ func ExposeServiceAndExportViaSubmariner(K8SCli *kubernetes.Clientset, K8SConfig
 	serviceExport, err := ExportService(K8SConfig, service, donorUUID)
 	if err != nil {
 		slog.Error("Failed to export Service via submariner", "error", err)
-		return nil, err
+		return "", nil, err
 	}
 	slog.Info("Successfully exported a service via submariner", "serviceExport", serviceExport)
-	var fqdns []string
+	fqdn := common.ResourceExposedFQDN(service)
+	var ports []int
 	for _, port := range service.Spec.Ports {
-		fqdns = append(fqdns, fmt.Sprintf("%s.%s.svc.clusterset.local:%d", service.Name, service.Namespace, port.Port))
+		ports = append(ports, int(port.Port))
 	}
-	slog.Info("Access the service with the FQDN", "service", service, "fqdns", fqdns)
-	return fqdns, nil // Return the FQDNs
+	slog.Info("Access the service with the FQDN", "service", service, "fqdn", fqdn, "ports", ports)
+	return fqdn, ports, nil
 }
 
 func CreateService(cli *kubernetes.Clientset, resource runtime.Object, donorUUID string, stealerUUID string) (*corev1.Service, error) {

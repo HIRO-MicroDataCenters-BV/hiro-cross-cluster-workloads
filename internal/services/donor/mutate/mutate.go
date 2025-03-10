@@ -9,7 +9,6 @@ import (
 	"hirocrossclusterworkloads/pkg/metrics"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -190,7 +189,8 @@ func InformAboutResource(resource runtime.Object, vconfig donor.DVConfig, js nat
 	emptyStealerDetails := common.StealerDetails{
 		StealerUUID:  common.DonorKVValuePending,
 		KVKey:        kvKey,
-		ExposedFQDNs: []string{},
+		ExposedFQDN:  "",
+		ExposedPorts: []int{},
 	}
 	emptyStealerDetailsBytes, err := json.Marshal(emptyStealerDetails)
 	if err != nil {
@@ -518,56 +518,133 @@ func redeployMutatedResourceWithStolenDetails(resource runtime.Object, k8scli ku
 		slog.Info("No ports are exposed in the resource", "resource", resource, "ports", ports)
 		return nil
 	}
-	var exposedFQDNs []string
+
+	exposedFQDN, err := getExposedFQDN(kv, kvKey)
+	if err != nil {
+		return err
+	}
+	slog.Info("Got the exposed FQDN", "exposedFQDN", exposedFQDN)
+	slog.Info("Adding to the mutated resource labels with the stolen resource access details", "resource", resource)
+
+	labelsMap := getResourceLabels(resource)
+	labelsMap["FQDN"] = exposedFQDN
+
+	switch resourceObj := resource.(type) {
+	case *corev1.Pod:
+		return updatePodWithFQDN(k8scli, resourceObj, labelsMap)
+	case *appsv1.Deployment:
+		return updateDeploymentWithFQDN(k8scli, resourceObj, labelsMap)
+	default:
+		slog.Warn("Unsupported resource type", "resource", resource)
+		return fmt.Errorf("redeployMutatedResourceWithStolenDetails: unsupported resource type")
+	}
+}
+
+func getExposedFQDN(kv nats.KeyValue, kvKey string) (string, error) {
 	for timeInSec := 0; timeInSec < 60; timeInSec++ {
 		entry, err := kv.Get(kvKey)
 		if err != nil {
 			slog.Error("Failed to get value from KV store", "error", err, "key", kvKey)
-			return err
+			return "", err
 		}
 		servingStealerDetails := common.StealerDetails{}
 		err = json.Unmarshal(entry.Value(), &servingStealerDetails)
 		if err != nil {
 			slog.Error("Failed to unmarshal servingStealerDetails", "error", err)
-			return err
+			return "", err
 		}
 		slog.Info("Got the servingStealerDetails", "servingStealerDetails", servingStealerDetails)
-		exposedFQDNs = servingStealerDetails.ExposedFQDNs
-		if len(exposedFQDNs) != 0 {
-			break
+		if servingStealerDetails.ExposedFQDN != "" {
+			return servingStealerDetails.ExposedFQDN, nil
 		}
 		time.Sleep(1 * time.Second)
 	}
-	slog.Info("Got the exposed FQDNs", "exposedFQDNs", exposedFQDNs)
-	slog.Info("Adding to the mutated resource labels with the stolen pod access details", "resource", resource)
-	// Add label to mutated resource with FQDNs
-	labels := resource.(metav1.Object).GetLabels()
-	if labels == nil {
-		labels = make(map[string]string)
-	}
-	labels["FQDNs"] = strings.ReplaceAll(strings.Join(exposedFQDNs, ","), ":", fqdnHostPortSeperator)
-	resource.(metav1.Object).SetLabels(labels)
+	return "", fmt.Errorf("failed to get exposed FQDN within the timeout period")
+}
 
-	// Update the resource with the new labels
+func getResourceLabels(resource runtime.Object) map[string]string {
 	switch resourceObj := resource.(type) {
 	case *corev1.Pod:
-		_, err := k8scli.CoreV1().Pods(resourceObj.Namespace).Update(context.TODO(), resourceObj, metav1.UpdateOptions{})
-		if err != nil {
-			slog.Error("Failed to update the mutated pod with FQDNs label", "error", err)
-			return err
-		}
-		slog.Info("Successfully updated the mutated pod with FQDNs label", "pod", resourceObj.Name, "namespace", resourceObj.Namespace, "labels", resourceObj.Labels)
+		return resourceObj.Labels
 	case *appsv1.Deployment:
-		_, err := k8scli.AppsV1().Deployments(resourceObj.Namespace).Update(context.TODO(), resourceObj, metav1.UpdateOptions{})
-		if err != nil {
-			slog.Error("Failed to update the mutated deployment with FQDNs label", "error", err)
-			return err
-		}
-		slog.Info("Successfully updated the mutated deployment with FQDNs label", "deployment", resourceObj.Name, "namespace", resourceObj.Namespace, "labels", resourceObj.Labels)
+		return resourceObj.Labels
 	default:
-		slog.Warn("Unsupported resource type", "resource", resource)
-		return fmt.Errorf("redeployMutatedResourceWithStolenDetails: unsupported resource type")
+		return nil
+	}
+}
+
+func updatePodWithFQDN(k8scli kubernetes.Clientset, pod *corev1.Pod, labelsMap map[string]string) error {
+	pod.SetLabels(labelsMap)
+	updatedPod, err := k8scli.CoreV1().Pods(pod.Namespace).Update(context.TODO(), pod, metav1.UpdateOptions{})
+	if err != nil {
+		slog.Error("Failed to update the mutated pod with FQDNs label", "error", err)
+		return err
+	}
+	slog.Info("Successfully updated the mutated pod with FQDNs label", "pod", updatedPod.Name, "namespace", updatedPod.Namespace, "labels", updatedPod.Labels)
+	return handleServiceAssociation(k8scli, updatedPod.Namespace, updatedPod.Labels, pod.Name)
+}
+
+func updateDeploymentWithFQDN(k8scli kubernetes.Clientset, deployment *appsv1.Deployment, labelsMap map[string]string) error {
+	deployment.SetLabels(labelsMap)
+	updatedDeployment, err := k8scli.AppsV1().Deployments(deployment.Namespace).Update(context.TODO(), deployment, metav1.UpdateOptions{})
+	if err != nil {
+		slog.Error("Failed to update the mutated deployment with FQDN label", "error", err)
+		return err
+	}
+	slog.Info("Successfully updated the mutated deployment with FQDN label", "deployment", updatedDeployment.Name, "namespace", updatedDeployment.Namespace, "labels", updatedDeployment.Labels)
+	return handleServiceAssociation(k8scli, updatedDeployment.Namespace, updatedDeployment.Labels, deployment.Name)
+}
+
+func handleServiceAssociation(k8scli kubernetes.Clientset, namespace string, labels map[string]string, resourceName string) error {
+	service, err := ServiceAssocitedWithResource(k8scli, namespace, labels)
+	if err != nil {
+		slog.Error("Failed to get the service associated with the resource", "error", err)
+		return err
+	}
+	if service == nil {
+		slog.Warn("No service associated with the resource", "resource", resourceName, "namespace", namespace)
+		return createProxyService(k8scli, namespace, labels, resourceName)
+	}
+	slog.Info("Service associated with the resource", "service", service.Name, "namespace", service.Namespace)
+	return nil
+}
+
+func createProxyService(k8scli kubernetes.Clientset, namespace string, labels map[string]string, resourceName string) error {
+	proxyService := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s-service-proxy", resourceName),
+			Namespace: namespace,
+			Labels:    labels,
+		},
+		Spec: corev1.ServiceSpec{
+			Type:         corev1.ServiceTypeExternalName,
+			ExternalName: labels["FQDN"],
+		},
 	}
 
+	createdService, err := k8scli.CoreV1().Services(namespace).Create(context.TODO(), proxyService, metav1.CreateOptions{})
+	if err != nil {
+		slog.Error("Failed to create proxy service", "error", err)
+		return err
+	}
+	slog.Info("Successfully created proxy service", "service", createdService.Name, "namespace", createdService.Namespace)
 	return nil
+}
+
+func ServiceAssocitedWithResource(k8scli kubernetes.Clientset, namespace string, lablesMap map[string]string) (*corev1.Service, error) {
+	services, err := k8scli.CoreV1().Services(namespace).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		slog.Error("Failed to list services", "error", err)
+		return nil, err
+	}
+
+	for _, svc := range services.Items {
+		for key, value := range svc.Spec.Selector {
+			if lablesMap[key] == value {
+				slog.Info("Found service associated with the resource", "service", svc.Name, "namespace", svc.Namespace)
+				return &svc, nil
+			}
+		}
+	}
+	return nil, nil
 }

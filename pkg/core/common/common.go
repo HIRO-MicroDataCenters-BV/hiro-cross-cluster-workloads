@@ -43,9 +43,10 @@ type DonorDetails struct {
 }
 
 type StealerDetails struct {
-	StealerUUID  string   `json:"stealerUUID"`
-	KVKey        string   `json:"kvKey"`
-	ExposedFQDNs []string `json:"exposedFQDNs"`
+	StealerUUID  string `json:"stealerUUID"`
+	KVKey        string `json:"kvKey"`
+	ExposedFQDN  string `json:"exposedFQDN"`
+	ExposedPorts []int  `json:"exposedPorts"`
 }
 
 type DonorPod struct {
@@ -224,4 +225,8 @@ func ResourceExposedPorts(resource runtime.Object) []corev1.ServicePort {
 
 	slog.Info("Exposed Ports", "ports", ports)
 	return ports
+}
+
+func ResourceExposedFQDN(service *corev1.Service) string {
+	return service.Name + "." + service.Namespace + ".svc.clusterset.local"
 }
