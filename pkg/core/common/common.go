@@ -3,6 +3,7 @@ package common
 import (
 	"context"
 	"log/slog"
+	"regexp"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -125,7 +126,12 @@ func MergeMaps(map1, map2 map[string]string) map[string]string {
 
 func IsItIgnoredNamespace(list []string, item string) bool {
 	for _, str := range list {
-		if str == item {
+		matched, err := regexp.MatchString(str, item)
+		if err != nil {
+			slog.Error("Error matching regex", "error", err, "namespace", item, "regex", str)
+			continue
+		}
+		if matched {
 			return true
 		}
 	}
