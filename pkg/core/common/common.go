@@ -186,7 +186,7 @@ func GeneratePollStealWorkloadKVKey(donorUUID, stealerUUID, namespace, podName s
 	return GenerateKVKey(donorUUID, stealerUUID, namespace, podName)
 }
 
-func PodExposedPorts(resource runtime.Object) []corev1.ServicePort {
+func ResourceExposedPorts(resource runtime.Object) []corev1.ServicePort {
 	var ports []corev1.ServicePort
 
 	switch r := resource.(type) {

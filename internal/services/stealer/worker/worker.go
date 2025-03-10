@@ -17,6 +17,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -121,7 +122,7 @@ func (c *Consume) InputMsgHandler(msg *nats.Msg, kv nats.KeyValue) {
 	} else if otherStealerUUID == stealerUUID {
 		slog.Info("Skipping Pod, I am already processed it", "podName", pod.Name,
 			"podNamespace", pod.Namespace, "stealerUUID", stealerUUID)
-		StealPod(c.K8SCli, pod, donorUUID, stealerUUID)
+		StealResource(c.K8SCli, &pod, donorUUID, stealerUUID)
 		msg.Ack()
 		return
 	} else {
@@ -148,12 +149,12 @@ func (c *Consume) InputMsgHandler(msg *nats.Msg, kv nats.KeyValue) {
 	// Acknowledge JetStream message
 	msg.Ack()
 
-	createdPod, err := StealPod(c.K8SCli, pod, donorUUID, stealerUUID)
+	createdResource, err := StealResource(c.K8SCli, &pod, donorUUID, stealerUUID)
 	if err != nil {
-		slog.Error("Failed to steal Pod", "error", err)
+		slog.Error("Failed to steal Resource", "error", err)
 		msg.Nak()
 	}
-	slog.Info("Successfully stole the Pod", "pod", createdPod)
+	slog.Info("Successfully stole the Resource", "resource", createdResource)
 
 	metrics.StealerClaimedTasksTotal.WithLabelValues(stealerUUID).Inc()
 	metrics.StolenTasksTotal.WithLabelValues(donorUUID, stealerUUID).Inc()
@@ -164,7 +165,7 @@ func (c *Consume) InputMsgHandler(msg *nats.Msg, kv nats.KeyValue) {
 	// 	checkForAnyFailuresOrRestarts(c.K8SCli, createdPod, kv, pollKVKey, waitTime)
 	// }()
 
-	fqdns, err := ExposeServiceAndExportViaSubmariner(c.K8SCli, c.K8SConfig, createdPod, donorUUID, stealerUUID)
+	fqdns, err := ExposeServiceAndExportViaSubmariner(c.K8SCli, c.K8SConfig, &createdResource, donorUUID, stealerUUID)
 	if err != nil {
 		slog.Error("Failed to expose Service and export via submariner", "error", err)
 		return
@@ -198,82 +199,93 @@ func (c *Consume) InputMsgHandler(msg *nats.Msg, kv nats.KeyValue) {
 	slog.Info("Successfully updated the KV bucket with exposed FQDNs", "fqdns", fqdns)
 }
 
-func StealPod(cli *kubernetes.Clientset, pod corev1.Pod, donorUUID string, stealerUUID string) (*corev1.Pod, error) {
-	success, err := CreateNamespace(cli, pod.Namespace)
+func StealResource(cli *kubernetes.Clientset, resource runtime.Object, donorUUID string, stealerUUID string) (runtime.Object, error) {
+	var namespace, name string
+	var labels map[string]string
+
+	switch r := resource.(type) {
+	case *corev1.Pod:
+		namespace = r.Namespace
+		name = r.Name
+		labels = r.Labels
+	case *appsv1.Deployment:
+		namespace = r.Namespace
+		name = r.Name
+		labels = r.Labels
+	default:
+		return nil, fmt.Errorf("StealResource: unsupported resource type")
+	}
+
+	success, err := CreateNamespace(cli, namespace)
 	if !success || err != nil {
 		slog.Error("Error occurred", "error", err)
 		return nil, err
 	}
 
-	sterilizeResourceInplace(&pod, donorUUID, stealerUUID)
+	sterilizeResourceInplace(&resource, donorUUID, stealerUUID)
 
-	// Get the Pod with the specified name and namespace
-	existingPod, err := cli.CoreV1().Pods(pod.Namespace).Get(context.TODO(), pod.Name, metav1.GetOptions{})
-	if err == nil {
-		if common.AreMapsEqual(existingPod.Labels, pod.Labels) {
-			slog.Info("Pod already stolen", "podName", pod.Name, "podNamespace", pod.Namespace)
-			return existingPod, nil
-		} else {
-			slog.Error("Cannot Steal; Same Pod exists with the specified details", "podName", pod.Name, "podNamespace", pod.Namespace)
-			return nil, fmt.Errorf("cannot steal; same pod already exists with the specified details: podName=%s, podNamespace=%s", pod.Name, pod.Namespace)
+	// Check if the resource already exists
+	switch r := resource.(type) {
+	case *corev1.Pod:
+		existingPod, err := cli.CoreV1().Pods(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+		if err == nil {
+			if common.AreMapsEqual(existingPod.Labels, labels) {
+				slog.Info("Pod already stolen", "podName", name, "podNamespace", namespace)
+				return existingPod, nil
+			} else {
+				slog.Error("Cannot Steal; Same Pod exists with the specified details", "podName", name, "podNamespace", namespace)
+				return nil, fmt.Errorf("cannot steal; same pod already exists with the specified details: podName=%s, podNamespace=%s", name, namespace)
+			}
+		} else if !apierrors.IsNotFound(err) {
+			slog.Error("Failed to get Pod with specified details", "podName", name, "podNamespace", namespace, "error", err)
+			return nil, err
 		}
-	} else if !apierrors.IsNotFound(err) {
-		slog.Error("Failed to get Pod with specified details", "podName", pod.Name, "podNamespace", pod.Namespace, "error", err)
-		return nil, err
-	}
 
-	// Create the Pod in Kubernetes
-	createdPod, err := cli.CoreV1().Pods(pod.Namespace).Create(context.TODO(), &pod, metav1.CreateOptions{})
-	if err != nil {
-		slog.Error("Failed to create Pod", "error", err)
-		return nil, err
-	}
-
-	if !isResourceSuccessfullyRunning(cli, createdPod.Namespace, createdPod.Name, "Pod", 5) {
-		slog.Error("Pod is not running within 5 min", "pod", createdPod)
-		return nil, fmt.Errorf("pod is not running within 5 min: podName=%s, podNamespace=%s", createdPod.Name, createdPod.Namespace)
-	}
-	slog.Info("Successfully stole the workload", "pod", createdPod)
-	return createdPod, nil
-}
-
-func StealDeployment(cli *kubernetes.Clientset, deployment appsv1.Deployment, donorUUID string, stealerUUID string) (*appsv1.Deployment, error) {
-	success, err := CreateNamespace(cli, deployment.Namespace)
-	if !success || err != nil {
-		slog.Error("Error occurred", "error", err)
-		return nil, err
-	}
-
-	sterilizeResourceInplace(&deployment, donorUUID, stealerUUID)
-
-	// Get the Pod with the specified name and namespace
-	existingDeployment, err := cli.AppsV1().Deployments(deployment.Namespace).Get(context.TODO(), deployment.Name, metav1.GetOptions{})
-	if err == nil {
-		if common.AreMapsEqual(existingDeployment.Labels, deployment.Labels) {
-			slog.Info("Deployment already stolen", "deploymentName", deployment.Name, "deploymentNamespace", deployment.Namespace)
-			return existingDeployment, nil
-		} else {
-			slog.Error("Cannot Steal; Same Deployment exists with the specified details", "deploymentName", deployment.Name, "deploymentNamespace", deployment.Namespace)
-			return nil, fmt.Errorf("cannot steal; same deployment already exists with the specified details: deploymentName=%s, deploymentNamespace=%s", deployment.Name, deployment.Namespace)
+		// Create the Pod in Kubernetes
+		createdPod, err := cli.CoreV1().Pods(namespace).Create(context.TODO(), r, metav1.CreateOptions{})
+		if err != nil {
+			slog.Error("Failed to create Pod", "error", err)
+			return nil, err
 		}
-	} else if !apierrors.IsNotFound(err) {
-		slog.Error("Failed to get Deployment with specified details", "deploymentName", deployment.Name, "deploymentNamespace", deployment.Namespace, "error", err)
-		return nil, err
+
+		if !isResourceSuccessfullyRunning(cli, createdPod.Namespace, createdPod.Name, "Pod", 5) {
+			slog.Error("Pod is not running within 5 min", "pod", createdPod)
+			return nil, fmt.Errorf("pod is not running within 5 min: podName=%s, podNamespace=%s", createdPod.Name, createdPod.Namespace)
+		}
+		slog.Info("Successfully stole the workload", "pod", createdPod)
+		return createdPod, nil
+
+	case *appsv1.Deployment:
+		existingDeployment, err := cli.AppsV1().Deployments(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+		if err == nil {
+			if common.AreMapsEqual(existingDeployment.Labels, labels) {
+				slog.Info("Deployment already stolen", "deploymentName", name, "deploymentNamespace", namespace)
+				return existingDeployment, nil
+			} else {
+				slog.Error("Cannot Steal; Same Deployment exists with the specified details", "deploymentName", name, "deploymentNamespace", namespace)
+				return nil, fmt.Errorf("cannot steal; same deployment already exists with the specified details: deploymentName=%s, deploymentNamespace=%s", name, namespace)
+			}
+		} else if !apierrors.IsNotFound(err) {
+			slog.Error("Failed to get Deployment with specified details", "deploymentName", name, "deploymentNamespace", namespace, "error", err)
+			return nil, err
+		}
+
+		// Create the Deployment in Kubernetes
+		createdDeployment, err := cli.AppsV1().Deployments(namespace).Create(context.TODO(), r, metav1.CreateOptions{})
+		if err != nil {
+			slog.Error("Failed to create Deployment", "error", err)
+			return nil, err
+		}
+
+		if !isResourceSuccessfullyRunning(cli, createdDeployment.Namespace, createdDeployment.Name, "Deployment", 5) {
+			slog.Error("Deployment is not running within 5 min", "deployment", createdDeployment)
+			return nil, fmt.Errorf("deployment is not running within 5 min: deploymentName=%s, deploymentNamespace=%s", createdDeployment.Name, createdDeployment.Namespace)
+		}
+		slog.Info("Successfully stole the workload", "deployment", createdDeployment)
+		return createdDeployment, nil
 	}
 
-	// Create the Deployment in Kubernetes
-	createdDeployment, err := cli.AppsV1().Deployments(deployment.Namespace).Create(context.TODO(), &deployment, metav1.CreateOptions{})
-	if err != nil {
-		slog.Error("Failed to create Deployment", "error", err)
-		return nil, err
-	}
-
-	if !isResourceSuccessfullyRunning(cli, createdDeployment.Namespace, createdDeployment.Name, "Deployment", 5) {
-		slog.Error("Pod is not running within 5 min", "pod", createdDeployment)
-		return nil, fmt.Errorf("pod is not running within 5 min: deploymentName=%s, deploymentNamespace=%s", createdDeployment.Name, createdDeployment.Namespace)
-	}
-	slog.Info("Successfully stole the workload", "pod", createdDeployment)
-	return createdDeployment, nil
+	return nil, fmt.Errorf("StealResource: unsupported resource type")
 }
 
 func CreateNamespace(cli *kubernetes.Clientset, namespace string) (bool, error) {
@@ -303,8 +315,8 @@ func CreateNamespace(cli *kubernetes.Clientset, namespace string) (bool, error) 
 	return true, nil
 }
 
-func sterilizeResourceInplace(resource metav1.Object, donorUUID string, stealerUUID string) {
-	switch resource := resource.(type) {
+func sterilizeResourceInplace(resource *runtime.Object, donorUUID string, stealerUUID string) {
+	switch resource := (*resource).(type) {
 	case *corev1.Pod:
 		sterilizePodInplace(resource, donorUUID, stealerUUID)
 	case *appsv1.Deployment:
@@ -380,15 +392,15 @@ func isResourceSuccessfullyRunning(clientset *kubernetes.Clientset, namespace, n
 }
 
 func ExposeServiceAndExportViaSubmariner(K8SCli *kubernetes.Clientset, K8SConfig *rest.Config,
-	createdPod *corev1.Pod, donorUUID string, stealerUUID string) ([]string, error) {
+	resource *runtime.Object, donorUUID string, stealerUUID string) ([]string, error) {
 	// Exposing the stolen Pod ports via a Service
-	service, err := CreateService(K8SCli, *createdPod, donorUUID, stealerUUID)
+	service, err := CreateService(K8SCli, *resource, donorUUID, stealerUUID)
 	if err != nil {
 		slog.Error("Failed to create Service", "error", err)
 		return nil, err
 	}
 	if service == nil {
-		slog.Info("No ports are exposed in the Pod", "pod", createdPod)
+		slog.Info("No ports are exposed in the resource", "resource", resource)
 		return nil, err
 	}
 	slog.Info("Successfully created Service", "service", service)
@@ -408,37 +420,44 @@ func ExposeServiceAndExportViaSubmariner(K8SCli *kubernetes.Clientset, K8SConfig
 	return fqdns, nil // Return the FQDNs
 }
 
-func CreateService(cli *kubernetes.Clientset, pod corev1.Pod, donorUUID string, stealerUUID string) (*corev1.Service, error) {
-	ports := common.PodExposedPorts(&pod)
+func CreateService(cli *kubernetes.Clientset, resource runtime.Object, donorUUID string, stealerUUID string) (*corev1.Service, error) {
+	ports := common.ResourceExposedPorts(resource)
 	if len(ports) == 0 {
-		slog.Info("No ports are exposed in the Pod", "pod", pod, "ports", ports)
+		slog.Info("No ports are exposed in the Resource", "resource", resource, "ports", ports)
 		return nil, nil
 	}
 
-	sName := common.GenerateServiceNameForStolenPod(pod.Name)
-	sNamespace := pod.Namespace
+	switch resource := resource.(type) {
+	case *corev1.Pod:
+	case *appsv1.Deployment:
+		sName := common.GenerateServiceNameForStolenPod(resource.Name)
+		sNamespace := resource.Namespace
 
-	service := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      sName,
-			Namespace: sNamespace,
-			Labels:    fetchStolenLabelsMap(&pod, donorUUID, stealerUUID),
-		},
-		Spec: corev1.ServiceSpec{
-			Selector: pod.Labels,
-			Ports:    ports,
-			Type:     corev1.ServiceTypeClusterIP,
-		},
+		service := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sName,
+				Namespace: sNamespace,
+				Labels:    fetchStolenLabelsMap(resource, donorUUID, stealerUUID),
+			},
+			Spec: corev1.ServiceSpec{
+				Selector: resource.Labels,
+				Ports:    ports,
+				Type:     corev1.ServiceTypeClusterIP,
+			},
+		}
+
+		createdService, err := cli.CoreV1().Services(sNamespace).Create(context.TODO(), service, metav1.CreateOptions{})
+		if err != nil {
+			slog.Error("Failed to create Service", "error", err)
+			return nil, err
+		}
+
+		slog.Info("Successfully created Service", "service", createdService)
+		return createdService, nil
+	default:
+		return nil, fmt.Errorf("unsupported resource type")
 	}
-
-	createdService, err := cli.CoreV1().Services(sNamespace).Create(context.TODO(), service, metav1.CreateOptions{})
-	if err != nil {
-		slog.Error("Failed to create Service", "error", err)
-		return nil, err
-	}
-
-	slog.Info("Successfully created Service", "service", createdService)
-	return createdService, nil
+	return nil, fmt.Errorf("unsupported resource type")
 }
 
 func checkForAnyFailuresOrRestarts(cli *kubernetes.Clientset, pod *corev1.Pod, kv nats.KeyValue, pollKVKey string, timeoutInMin int) error {

@@ -512,7 +512,7 @@ func createResourceWithLabel(resource runtime.Object, resourceType, resourceName
 }
 
 func redeployMutatedResourceWithStolenDetails(resource runtime.Object, k8scli kubernetes.Clientset, kv nats.KeyValue, kvKey string) error {
-	ports := common.PodExposedPorts(resource)
+	ports := common.ResourceExposedPorts(resource)
 	if len(ports) == 0 {
 		slog.Info("No ports are exposed in the resource", "resource", resource, "ports", ports)
 		return nil
