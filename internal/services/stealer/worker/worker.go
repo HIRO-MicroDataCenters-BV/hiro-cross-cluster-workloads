@@ -328,7 +328,7 @@ func sterilizePodInplace(pod *corev1.Pod, donorUUID string, stealerUUID string) 
 	newPodObjectMeta := metav1.ObjectMeta{
 		Name:        pod.Name,
 		Namespace:   pod.Namespace,
-		Labels:      fetchStolenLabelsMap(pod, donorUUID, stealerUUID),
+		Labels:      fetchStolenLabelsMap(pod.Labels, donorUUID, stealerUUID),
 		Annotations: pod.Annotations,
 	}
 	pod.ObjectMeta = newPodObjectMeta
@@ -338,16 +338,16 @@ func sterilizeDeploymentInplace(deployment *appsv1.Deployment, donorUUID string,
 	newDeploymentObjectMeta := metav1.ObjectMeta{
 		Name:        deployment.Name,
 		Namespace:   deployment.Namespace,
-		Labels:      fetchStolenLabelsMap(deployment, donorUUID, stealerUUID),
+		Labels:      fetchStolenLabelsMap(deployment.Labels, donorUUID, stealerUUID),
 		Annotations: deployment.Annotations,
 	}
 	deployment.ObjectMeta = newDeploymentObjectMeta
 }
 
-func fetchStolenLabelsMap(resource metav1.Object, donorUUID string, stealerUUID string) map[string]string {
+func fetchStolenLabelsMap(lables map[string]string, donorUUID string, stealerUUID string) map[string]string {
 	common.StolenPodLablesMap["donorUUID"] = donorUUID
 	common.StolenPodLablesMap["stealerUUID"] = stealerUUID
-	return common.MergeMaps(resource.GetLabels(), common.StolenPodLablesMap)
+	return common.MergeMaps(lables, common.StolenPodLablesMap)
 }
 
 func isResourceSuccessfullyRunning(clientset *kubernetes.Clientset, namespace, name string, resourceType string, waitTime int) bool {
@@ -428,19 +428,33 @@ func CreateService(cli *kubernetes.Clientset, resource runtime.Object, donorUUID
 	}
 
 	switch resource := resource.(type) {
-	case *corev1.Pod:
-	case *appsv1.Deployment:
-		sName := common.GenerateServiceNameForStolenPod(resource.Name)
-		sNamespace := resource.Namespace
+	case *corev1.Pod, *appsv1.Deployment:
+		var sName, sNamespace string
+		var rLabels, sLabels map[string]string
+		switch r := resource.(type) {
+		case *corev1.Pod:
+			sName = common.GenerateServiceNameForStolenPod(r.Name)
+			sNamespace = r.Namespace
+			rLabels = r.Labels
+			sLabels = fetchStolenLabelsMap(r.Labels, donorUUID, stealerUUID)
+		case *appsv1.Deployment:
+			sName = common.GenerateServiceNameForStolenPod(r.Name)
+			sNamespace = r.Namespace
+			rLabels = r.Labels
+			sLabels = fetchStolenLabelsMap(r.Labels, donorUUID, stealerUUID)
+		default:
+			slog.Error("CreateService: Unsupported resource type")
+			return nil, fmt.Errorf("CreateService: unsupported resource type")
+		}
 
 		service := &corev1.Service{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      sName,
 				Namespace: sNamespace,
-				Labels:    fetchStolenLabelsMap(resource, donorUUID, stealerUUID),
+				Labels:    sLabels,
 			},
 			Spec: corev1.ServiceSpec{
-				Selector: resource.Labels,
+				Selector: rLabels,
 				Ports:    ports,
 				Type:     corev1.ServiceTypeClusterIP,
 			},
@@ -454,10 +468,8 @@ func CreateService(cli *kubernetes.Clientset, resource runtime.Object, donorUUID
 
 		slog.Info("Successfully created Service", "service", createdService)
 		return createdService, nil
-	default:
-		return nil, fmt.Errorf("unsupported resource type")
 	}
-	return nil, fmt.Errorf("unsupported resource type")
+	return nil, fmt.Errorf("CreateService: unsupported resource type")
 }
 
 func checkForAnyFailuresOrRestarts(cli *kubernetes.Clientset, pod *corev1.Pod, kv nats.KeyValue, pollKVKey string, timeoutInMin int) error {

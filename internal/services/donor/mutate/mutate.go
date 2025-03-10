@@ -36,7 +36,8 @@ var (
 	mutatePodLablesMap = map[string]string{
 		"is-pod-stolen": "true",
 	}
-	pollWaitTimeInMin = 10 // This has to be decide from some intelligence (like how long it takes to process the pod)
+	pollWaitTimeInMin     = 10 // This has to be decide from some intelligence (like how long it takes to process the pod)
+	fqdnHostPortSeperator = "_"
 )
 
 type validator struct {
@@ -544,7 +545,7 @@ func redeployMutatedResourceWithStolenDetails(resource runtime.Object, k8scli ku
 	if labels == nil {
 		labels = make(map[string]string)
 	}
-	labels["FQDNs"] = strings.ReplaceAll(strings.Join(exposedFQDNs, ","), ":", " ")
+	labels["FQDNs"] = strings.ReplaceAll(strings.Join(exposedFQDNs, ","), ":", fqdnHostPortSeperator)
 	resource.(metav1.Object).SetLabels(labels)
 
 	// Update the resource with the new labels
