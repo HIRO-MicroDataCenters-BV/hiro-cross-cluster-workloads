@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"strings"
 
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -53,7 +54,12 @@ type DonorPod struct {
 
 type DonorJob struct {
 	DonorDetails DonorDetails `json:"donorDetails"`
-	Job          *batchv1.Job `json:"service"`
+	Job          *batchv1.Job `json:"job"`
+}
+
+type DonorDeployment struct {
+	DonorDetails DonorDetails       `json:"donorDetails"`
+	Deployment   *appsv1.Deployment `json:"deployment"`
 }
 
 type Result struct {
@@ -180,18 +186,36 @@ func GeneratePollStealWorkloadKVKey(donorUUID, stealerUUID, namespace, podName s
 	return GenerateKVKey(donorUUID, stealerUUID, namespace, podName)
 }
 
-func PodExposedPorts(pod *corev1.Pod) []corev1.ServicePort {
+func PodExposedPorts(resource runtime.Object) []corev1.ServicePort {
 	var ports []corev1.ServicePort
-	for _, container := range pod.Spec.Containers {
-		for _, port := range container.Ports {
-			ports = append(ports, corev1.ServicePort{
-				Name:       port.Name,
-				Protocol:   port.Protocol,
-				Port:       port.ContainerPort,
-				TargetPort: intstr.FromInt(int(port.ContainerPort)),
-			})
+
+	switch r := resource.(type) {
+	case *corev1.Pod:
+		for _, container := range r.Spec.Containers {
+			for _, port := range container.Ports {
+				ports = append(ports, corev1.ServicePort{
+					Name:       port.Name,
+					Protocol:   port.Protocol,
+					Port:       port.ContainerPort,
+					TargetPort: intstr.FromInt(int(port.ContainerPort)),
+				})
+			}
 		}
+	case *appsv1.Deployment:
+		for _, container := range r.Spec.Template.Spec.Containers {
+			for _, port := range container.Ports {
+				ports = append(ports, corev1.ServicePort{
+					Name:       port.Name,
+					Protocol:   port.Protocol,
+					Port:       port.ContainerPort,
+					TargetPort: intstr.FromInt(int(port.ContainerPort)),
+				})
+			}
+		}
+	default:
+		slog.Warn("Unsupported resource type", "resource", resource)
 	}
-	slog.Info("Pod Exposed Ports", "ports", ports)
+
+	slog.Info("Exposed Ports", "ports", ports)
 	return ports
 }
