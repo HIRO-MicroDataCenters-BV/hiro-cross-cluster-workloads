@@ -35,8 +35,7 @@ var (
 	mutatePodLablesMap = map[string]string{
 		"is-pod-stolen": "true",
 	}
-	pollWaitTimeInMin     = 10 // This has to be decide from some intelligence (like how long it takes to process the pod)
-	fqdnHostPortSeperator = "_"
+	pollWaitTimeInMin = 10 // This has to be decide from some intelligence (like how long it takes to process the pod)
 )
 
 type validator struct {
@@ -152,7 +151,7 @@ func (v *validator) mutateResourceWrapper(resource runtime.Object) *admission.Ad
 	uniqueIgnoredNamespaces := common.MergeUnique(ignoreNamespaces, common.K8SNamespaces)
 	if common.IsItIgnoredNamespace(uniqueIgnoredNamespaces, resourceNamespace) {
 		slog.Info(fmt.Sprintf("Ignoring as %s belongs to Ignored Namespaces", resourceType), "namespaces", ignoreNamespaces)
-		return nil
+		return &admission.AdmissionResponse{Allowed: true}
 	}
 
 	slog.Info("Mutate the resource", "name", resourceName, "namespace", resourceNamespace, "resourceType", resourceType, "labels", labels)
@@ -335,7 +334,7 @@ func (v *validator) mutateResource(resource runtime.Object, kv nats.KeyValue, kv
 			}
 		}
 
-		go redeployMutatedResourceWithStolenDetails(modifiedPod, *v.K8Scli, kv, kvKey)
+		go redeployMutatedResourceWithStolenDetails(modifiedPod, *v.K8Scli, kv, kvKey, v.VConfig.LableToFilter)
 
 	case *batchv1.Job:
 		originalJob := resourceObj.DeepCopy()
@@ -409,7 +408,7 @@ func (v *validator) mutateResource(resource runtime.Object, kv nats.KeyValue, kv
 				},
 			}
 		}
-		go redeployMutatedResourceWithStolenDetails(modifiedDeployment, *v.K8Scli, kv, kvKey)
+		go redeployMutatedResourceWithStolenDetails(modifiedDeployment, *v.K8Scli, kv, kvKey, v.VConfig.LableToFilter)
 
 	default:
 		return &admission.AdmissionResponse{
@@ -512,10 +511,10 @@ func createResourceWithLabel(resource runtime.Object, resourceType, resourceName
 	return nil
 }
 
-func redeployMutatedResourceWithStolenDetails(resource runtime.Object, k8scli kubernetes.Clientset, kv nats.KeyValue, kvKey string) error {
-	ports := common.ResourceExposedPorts(resource)
-	if len(ports) == 0 {
-		slog.Info("No ports are exposed in the resource", "resource", resource, "ports", ports)
+func redeployMutatedResourceWithStolenDetails(resource runtime.Object, k8scli kubernetes.Clientset, kv nats.KeyValue, kvKey string, labelToAvoidStealing string) error {
+	exposedPorts := common.ResourceExposedPorts(resource)
+	if len(exposedPorts) == 0 {
+		slog.Info("No ports are exposed in the resource", "resource", resource, "ports", exposedPorts)
 		return nil
 	}
 
@@ -531,9 +530,13 @@ func redeployMutatedResourceWithStolenDetails(resource runtime.Object, k8scli ku
 
 	switch resourceObj := resource.(type) {
 	case *corev1.Pod:
-		return updatePodWithFQDN(k8scli, resourceObj, labelsMap)
+		updatePodWithFQDN(k8scli, resourceObj, labelsMap)
+		handleServiceAssociation(k8scli, resourceObj.Namespace, resourceObj.Name, labelsMap, labelToAvoidStealing, exposedFQDN, exposedPorts)
+		return nil
 	case *appsv1.Deployment:
-		return updateDeploymentWithFQDN(k8scli, resourceObj, labelsMap)
+		updateDeploymentWithFQDN(k8scli, resourceObj, labelsMap)
+		handleServiceAssociation(k8scli, resourceObj.Namespace, resourceObj.Name, labelsMap, labelToAvoidStealing, exposedFQDN, exposedPorts)
+		return nil
 	default:
 		slog.Warn("Unsupported resource type", "resource", resource)
 		return fmt.Errorf("redeployMutatedResourceWithStolenDetails: unsupported resource type")
@@ -581,7 +584,8 @@ func updatePodWithFQDN(k8scli kubernetes.Clientset, pod *corev1.Pod, labelsMap m
 		return err
 	}
 	slog.Info("Successfully updated the mutated pod with FQDNs label", "pod", updatedPod.Name, "namespace", updatedPod.Namespace, "labels", updatedPod.Labels)
-	return handleServiceAssociation(k8scli, updatedPod.Namespace, updatedPod.Labels, pod.Name)
+	// return handleServiceAssociation(k8scli, updatedPod.Namespace, updatedPod.Labels, pod.Name)
+	return nil
 }
 
 func updateDeploymentWithFQDN(k8scli kubernetes.Clientset, deployment *appsv1.Deployment, labelsMap map[string]string) error {
@@ -592,10 +596,11 @@ func updateDeploymentWithFQDN(k8scli kubernetes.Clientset, deployment *appsv1.De
 		return err
 	}
 	slog.Info("Successfully updated the mutated deployment with FQDN label", "deployment", updatedDeployment.Name, "namespace", updatedDeployment.Namespace, "labels", updatedDeployment.Labels)
-	return handleServiceAssociation(k8scli, updatedDeployment.Namespace, updatedDeployment.Labels, deployment.Name)
+	// return handleServiceAssociation(k8scli, updatedDeployment.Namespace, updatedDeployment.Labels, deployment.Name)
+	return nil
 }
 
-func handleServiceAssociation(k8scli kubernetes.Clientset, namespace string, labels map[string]string, resourceName string) error {
+func handleServiceAssociation(k8scli kubernetes.Clientset, namespace string, resourceName string, labels map[string]string, labelToAvoidStealing string, exposedFQDN string, exposedPorts []corev1.ServicePort) error {
 	service, err := ServiceAssocitedWithResource(k8scli, namespace, labels)
 	if err != nil {
 		slog.Error("Failed to get the service associated with the resource", "error", err)
@@ -603,31 +608,15 @@ func handleServiceAssociation(k8scli kubernetes.Clientset, namespace string, lab
 	}
 	if service == nil {
 		slog.Warn("No service associated with the resource", "resource", resourceName, "namespace", namespace)
-		return createProxyService(k8scli, namespace, labels, resourceName)
+		labels[labelToAvoidStealing] = "true"
+		// service, err = CreateProxyServiceAsRevereseProxy(k8scli, resourceName, namespace, labels, exposedFQDN, exposedPorts, 1)
+		service, err = CreateProxyServiceWithHeadLessType(k8scli, resourceName, namespace, labels, exposedFQDN)
+		if err != nil {
+			slog.Error("Failed to create proxy service", "error", err)
+			return err
+		}
 	}
 	slog.Info("Service associated with the resource", "service", service.Name, "namespace", service.Namespace)
-	return nil
-}
-
-func createProxyService(k8scli kubernetes.Clientset, namespace string, labels map[string]string, resourceName string) error {
-	proxyService := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("%s-service-proxy", resourceName),
-			Namespace: namespace,
-			Labels:    labels,
-		},
-		Spec: corev1.ServiceSpec{
-			Type:         corev1.ServiceTypeExternalName,
-			ExternalName: labels["FQDN"],
-		},
-	}
-
-	createdService, err := k8scli.CoreV1().Services(namespace).Create(context.TODO(), proxyService, metav1.CreateOptions{})
-	if err != nil {
-		slog.Error("Failed to create proxy service", "error", err)
-		return err
-	}
-	slog.Info("Successfully created proxy service", "service", createdService.Name, "namespace", createdService.Namespace)
 	return nil
 }
 

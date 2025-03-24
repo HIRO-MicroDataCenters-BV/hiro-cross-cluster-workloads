@@ -127,6 +127,12 @@ func MergeMaps(map1, map2 map[string]string) map[string]string {
 
 func IsItIgnoredNamespace(list []string, item string) bool {
 	for _, str := range list {
+		if !strings.HasPrefix(str, "^") {
+			str = "^" + str
+		}
+		if !strings.HasSuffix(str, "$") {
+			str = str + "$"
+		}
 		matched, err := regexp.MatchString(str, item)
 		if err != nil {
 			slog.Error("Error matching regex", "error", err, "namespace", item, "regex", str)
