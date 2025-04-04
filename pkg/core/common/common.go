@@ -3,8 +3,10 @@ package common
 import (
 	"context"
 	"log/slog"
+	"regexp"
 	"strings"
 
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -41,9 +43,10 @@ type DonorDetails struct {
 }
 
 type StealerDetails struct {
-	StealerUUID  string   `json:"stealerUUID"`
-	KVKey        string   `json:"kvKey"`
-	ExposedFQDNs []string `json:"exposedFQDNs"`
+	StealerUUID  string `json:"stealerUUID"`
+	KVKey        string `json:"kvKey"`
+	ExposedFQDN  string `json:"exposedFQDN"`
+	ExposedPorts []int  `json:"exposedPorts"`
 }
 
 type DonorPod struct {
@@ -53,7 +56,12 @@ type DonorPod struct {
 
 type DonorJob struct {
 	DonorDetails DonorDetails `json:"donorDetails"`
-	Job          *batchv1.Job `json:"service"`
+	Job          *batchv1.Job `json:"job"`
+}
+
+type DonorDeployment struct {
+	DonorDetails DonorDetails       `json:"donorDetails"`
+	Deployment   *appsv1.Deployment `json:"deployment"`
 }
 
 type Result struct {
@@ -119,7 +127,18 @@ func MergeMaps(map1, map2 map[string]string) map[string]string {
 
 func IsItIgnoredNamespace(list []string, item string) bool {
 	for _, str := range list {
-		if str == item {
+		if !strings.HasPrefix(str, "^") {
+			str = "^" + str
+		}
+		if !strings.HasSuffix(str, "$") {
+			str = str + "$"
+		}
+		matched, err := regexp.MatchString(str, item)
+		if err != nil {
+			slog.Error("Error matching regex", "error", err, "namespace", item, "regex", str)
+			continue
+		}
+		if matched {
 			return true
 		}
 	}
@@ -180,18 +199,40 @@ func GeneratePollStealWorkloadKVKey(donorUUID, stealerUUID, namespace, podName s
 	return GenerateKVKey(donorUUID, stealerUUID, namespace, podName)
 }
 
-func PodExposedPorts(pod *corev1.Pod) []corev1.ServicePort {
+func ResourceExposedPorts(resource runtime.Object) []corev1.ServicePort {
 	var ports []corev1.ServicePort
-	for _, container := range pod.Spec.Containers {
-		for _, port := range container.Ports {
-			ports = append(ports, corev1.ServicePort{
-				Name:       port.Name,
-				Protocol:   port.Protocol,
-				Port:       port.ContainerPort,
-				TargetPort: intstr.FromInt(int(port.ContainerPort)),
-			})
+
+	switch r := resource.(type) {
+	case *corev1.Pod:
+		for _, container := range r.Spec.Containers {
+			for _, port := range container.Ports {
+				ports = append(ports, corev1.ServicePort{
+					Name:       port.Name,
+					Protocol:   port.Protocol,
+					Port:       port.ContainerPort,
+					TargetPort: intstr.FromInt(int(port.ContainerPort)),
+				})
+			}
 		}
+	case *appsv1.Deployment:
+		for _, container := range r.Spec.Template.Spec.Containers {
+			for _, port := range container.Ports {
+				ports = append(ports, corev1.ServicePort{
+					Name:       port.Name,
+					Protocol:   port.Protocol,
+					Port:       port.ContainerPort,
+					TargetPort: intstr.FromInt(int(port.ContainerPort)),
+				})
+			}
+		}
+	default:
+		slog.Warn("Unsupported resource type", "resource", resource)
 	}
-	slog.Info("Pod Exposed Ports", "ports", ports)
+
+	slog.Info("Exposed Ports", "ports", ports)
 	return ports
+}
+
+func ResourceExposedFQDN(service *corev1.Service) string {
+	return service.Name + "." + service.Namespace + ".svc.clusterset.local"
 }

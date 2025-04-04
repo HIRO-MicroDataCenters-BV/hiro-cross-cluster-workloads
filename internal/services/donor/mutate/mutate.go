@@ -9,13 +9,13 @@ import (
 	"hirocrossclusterworkloads/pkg/metrics"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/mattbaird/jsonpatch"
 	"github.com/nats-io/nats.go"
 	admission "k8s.io/api/admission/v1"
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -63,7 +63,8 @@ func (v *validator) Mutate(ar admission.AdmissionReview) *admission.AdmissionRes
 	slog.Info("Make pod Invalid")
 	podResource := metav1.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
 	jobResource := metav1.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"}
-	expectedResources := []metav1.GroupVersionResource{podResource, jobResource}
+	deploymentResource := metav1.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	expectedResources := []metav1.GroupVersionResource{podResource, jobResource, deploymentResource}
 	if ar.Request.Resource != podResource && ar.Request.Resource != jobResource {
 		slog.Error("expected resource does not match", "expected", expectedResources, "received", ar.Request.Resource)
 		return nil
@@ -75,6 +76,7 @@ func (v *validator) Mutate(ar admission.AdmissionReview) *admission.AdmissionRes
 	raw := ar.Request.Object.Raw
 	pod := corev1.Pod{}
 	job := batchv1.Job{}
+	deployment := appsv1.Deployment{}
 
 	if ar.Request.Kind.Kind == "Pod" {
 		_, _, err := common.Deserializer.Decode(raw, nil, &pod)
@@ -89,7 +91,7 @@ func (v *validator) Mutate(ar admission.AdmissionReview) *admission.AdmissionRes
 		return v.mutateResourceWrapper(&pod)
 	} else if ar.Request.Kind.Kind == "Job" {
 		if _, _, err := common.Deserializer.Decode(raw, nil, &job); err != nil {
-			slog.Error("failed to decode service", "error", err)
+			slog.Error("failed to decode job", "error", err)
 			return &admission.AdmissionResponse{
 				Result: &metav1.Status{
 					Message: err.Error(),
@@ -97,6 +99,16 @@ func (v *validator) Mutate(ar admission.AdmissionReview) *admission.AdmissionRes
 			}
 		}
 		return v.mutateResourceWrapper(&job)
+	} else if ar.Request.Kind.Kind == "Deployment" {
+		if _, _, err := common.Deserializer.Decode(raw, nil, &deployment); err != nil {
+			slog.Error("failed to decode deployment", "error", err)
+			return &admission.AdmissionResponse{
+				Result: &metav1.Status{
+					Message: err.Error(),
+				},
+			}
+		}
+		return v.mutateResourceWrapper(&deployment)
 	}
 	return nil
 }
@@ -119,6 +131,12 @@ func (v *validator) mutateResourceWrapper(resource runtime.Object) *admission.Ad
 		labels = resourceObj.Labels
 		isNotEligibleToSteal = common.IsLabelExists(resourceObj, v.VConfig.LableToFilter) || common.IsLabelExists(resourceObj, common.StolenPodFailedLable)
 		resourceType = "Job"
+	case *appsv1.Deployment:
+		resourceName = resourceObj.Name
+		resourceNamespace = resourceObj.Namespace
+		labels = resourceObj.Labels
+		isNotEligibleToSteal = common.IsLabelExists(resourceObj, v.VConfig.LableToFilter) || common.IsLabelExists(resourceObj, common.StolenPodFailedLable)
+		resourceType = "Deployment"
 	default:
 		return &admission.AdmissionResponse{Allowed: true}
 	}
@@ -133,7 +151,7 @@ func (v *validator) mutateResourceWrapper(resource runtime.Object) *admission.Ad
 	uniqueIgnoredNamespaces := common.MergeUnique(ignoreNamespaces, common.K8SNamespaces)
 	if common.IsItIgnoredNamespace(uniqueIgnoredNamespaces, resourceNamespace) {
 		slog.Info(fmt.Sprintf("Ignoring as %s belongs to Ignored Namespaces", resourceType), "namespaces", ignoreNamespaces)
-		return nil
+		return &admission.AdmissionResponse{Allowed: true}
 	}
 
 	slog.Info("Mutate the resource", "name", resourceName, "namespace", resourceNamespace, "resourceType", resourceType, "labels", labels)
@@ -170,7 +188,8 @@ func InformAboutResource(resource runtime.Object, vconfig donor.DVConfig, js nat
 	emptyStealerDetails := common.StealerDetails{
 		StealerUUID:  common.DonorKVValuePending,
 		KVKey:        kvKey,
-		ExposedFQDNs: []string{},
+		ExposedFQDN:  "",
+		ExposedPorts: []int{},
 	}
 	emptyStealerDetailsBytes, err := json.Marshal(emptyStealerDetails)
 	if err != nil {
@@ -315,7 +334,7 @@ func (v *validator) mutateResource(resource runtime.Object, kv nats.KeyValue, kv
 			}
 		}
 
-		go redeployMutatedPodWithStolenPodDetails(modifiedPod, *v.K8Scli, kv, kvKey)
+		go redeployMutatedResourceWithStolenDetails(modifiedPod, *v.K8Scli, kv, kvKey, v.VConfig.LableToFilter)
 
 	case *batchv1.Job:
 		originalJob := resourceObj.DeepCopy()
@@ -353,6 +372,43 @@ func (v *validator) mutateResource(resource runtime.Object, kv nats.KeyValue, kv
 				},
 			}
 		}
+	case *appsv1.Deployment:
+		originalDeployment := resourceObj.DeepCopy()
+		modifiedDeployment := originalDeployment.DeepCopy()
+
+		// Modify spec selctor to make sure the job in pending state
+		modifiedDeployment.Spec.Selector = nil
+		if modifiedDeployment.Labels == nil {
+			modifiedDeployment.Labels = make(map[string]string)
+		}
+		maps.Copy(modifiedDeployment.Labels, originalDeployment.Labels)
+		maps.Copy(modifiedDeployment.Labels, mutatePodLablesMap)
+		maps.Copy(modifiedDeployment.Labels, map[string]string{
+			"donorUUID":   donorUUID,
+			"stealerUUID": stealerUUID,
+		})
+		modifiedDeployment.Labels = map[string]string{}
+
+		originalJSON, err = json.Marshal(originalDeployment)
+		if err != nil {
+			return &admission.AdmissionResponse{
+				Result: &metav1.Status{
+					Message: fmt.Sprintf("Failed to marshal original deployment: %v", err),
+					Code:    http.StatusInternalServerError,
+				},
+			}
+		}
+
+		modifiedJSON, err = json.Marshal(modifiedDeployment)
+		if err != nil {
+			return &admission.AdmissionResponse{
+				Result: &metav1.Status{
+					Message: fmt.Sprintf("Failed to marshal modified deployment: %v", err),
+					Code:    http.StatusInternalServerError,
+				},
+			}
+		}
+		go redeployMutatedResourceWithStolenDetails(modifiedDeployment, *v.K8Scli, kv, kvKey, v.VConfig.LableToFilter)
 
 	default:
 		return &admission.AdmissionResponse{
@@ -455,47 +511,129 @@ func createResourceWithLabel(resource runtime.Object, resourceType, resourceName
 	return nil
 }
 
-func redeployMutatedPodWithStolenPodDetails(mutatedPod *corev1.Pod, k8scli kubernetes.Clientset, kv nats.KeyValue, kvKey string) error {
-	ports := common.PodExposedPorts(mutatedPod)
-	if len(ports) == 0 {
-		slog.Info("No ports are exposed in the Pod", "pod", mutatedPod, "ports", ports)
+func redeployMutatedResourceWithStolenDetails(resource runtime.Object, k8scli kubernetes.Clientset, kv nats.KeyValue, kvKey string, labelToAvoidStealing string) error {
+	exposedPorts := common.ResourceExposedPorts(resource)
+	if len(exposedPorts) == 0 {
+		slog.Info("No ports are exposed in the resource", "resource", resource, "ports", exposedPorts)
 		return nil
 	}
-	var exposedFQDNs []string
+
+	exposedFQDN, err := getExposedFQDN(kv, kvKey)
+	if err != nil {
+		return err
+	}
+	slog.Info("Got the exposed FQDN", "exposedFQDN", exposedFQDN)
+	slog.Info("Adding to the mutated resource labels with the stolen resource access details", "resource", resource)
+
+	labelsMap := getResourceLabels(resource)
+	labelsMap["FQDN"] = exposedFQDN
+
+	switch resourceObj := resource.(type) {
+	case *corev1.Pod:
+		updatePodWithFQDN(k8scli, resourceObj, labelsMap)
+		handleServiceAssociation(k8scli, resourceObj.Namespace, resourceObj.Name, labelsMap, labelToAvoidStealing, exposedFQDN, exposedPorts)
+		return nil
+	case *appsv1.Deployment:
+		updateDeploymentWithFQDN(k8scli, resourceObj, labelsMap)
+		handleServiceAssociation(k8scli, resourceObj.Namespace, resourceObj.Name, labelsMap, labelToAvoidStealing, exposedFQDN, exposedPorts)
+		return nil
+	default:
+		slog.Warn("Unsupported resource type", "resource", resource)
+		return fmt.Errorf("redeployMutatedResourceWithStolenDetails: unsupported resource type")
+	}
+}
+
+func getExposedFQDN(kv nats.KeyValue, kvKey string) (string, error) {
 	for timeInSec := 0; timeInSec < 60; timeInSec++ {
 		entry, err := kv.Get(kvKey)
 		if err != nil {
 			slog.Error("Failed to get value from KV store", "error", err, "key", kvKey)
-			return err
+			return "", err
 		}
 		servingStealerDetails := common.StealerDetails{}
 		err = json.Unmarshal(entry.Value(), &servingStealerDetails)
 		if err != nil {
 			slog.Error("Failed to unmarshal servingStealerDetails", "error", err)
-			return err
+			return "", err
 		}
 		slog.Info("Got the servingStealerDetails", "servingStealerDetails", servingStealerDetails)
-		exposedFQDNs = servingStealerDetails.ExposedFQDNs
-		if len(exposedFQDNs) != 0 {
-			break
+		if servingStealerDetails.ExposedFQDN != "" {
+			return servingStealerDetails.ExposedFQDN, nil
 		}
 		time.Sleep(1 * time.Second)
 	}
-	slog.Info("Got the exposed FQDNs", "exposedFQDNs", exposedFQDNs)
-	slog.Info("Adding to the mutated pod lables with the stolen pod access details", "mutatedPod", mutatedPod)
-	// Add label to mutatedPod with FQDNs
-	if mutatedPod.Labels == nil {
-		mutatedPod.Labels = make(map[string]string)
-	}
-	mutatedPod.Labels["FQDNs"] = strings.ReplaceAll(strings.Join(exposedFQDNs, ","), ":", "_")
+	return "", fmt.Errorf("failed to get exposed FQDN within the timeout period")
+}
 
-	// Update the pod with the new labels
-	_, err := k8scli.CoreV1().Pods(mutatedPod.Namespace).Update(context.TODO(), mutatedPod, metav1.UpdateOptions{})
+func getResourceLabels(resource runtime.Object) map[string]string {
+	switch resourceObj := resource.(type) {
+	case *corev1.Pod:
+		return resourceObj.Labels
+	case *appsv1.Deployment:
+		return resourceObj.Labels
+	default:
+		return nil
+	}
+}
+
+func updatePodWithFQDN(k8scli kubernetes.Clientset, pod *corev1.Pod, labelsMap map[string]string) error {
+	pod.SetLabels(labelsMap)
+	updatedPod, err := k8scli.CoreV1().Pods(pod.Namespace).Update(context.TODO(), pod, metav1.UpdateOptions{})
 	if err != nil {
 		slog.Error("Failed to update the mutated pod with FQDNs label", "error", err)
 		return err
 	}
-	slog.Info("Successfully updated the mutated pod with FQDNs label", "pod", mutatedPod.Name, "namespace", mutatedPod.Namespace, "labels", mutatedPod.Labels)
-
+	slog.Info("Successfully updated the mutated pod with FQDNs label", "pod", updatedPod.Name, "namespace", updatedPod.Namespace, "labels", updatedPod.Labels)
+	// return handleServiceAssociation(k8scli, updatedPod.Namespace, updatedPod.Labels, pod.Name)
 	return nil
+}
+
+func updateDeploymentWithFQDN(k8scli kubernetes.Clientset, deployment *appsv1.Deployment, labelsMap map[string]string) error {
+	deployment.SetLabels(labelsMap)
+	updatedDeployment, err := k8scli.AppsV1().Deployments(deployment.Namespace).Update(context.TODO(), deployment, metav1.UpdateOptions{})
+	if err != nil {
+		slog.Error("Failed to update the mutated deployment with FQDN label", "error", err)
+		return err
+	}
+	slog.Info("Successfully updated the mutated deployment with FQDN label", "deployment", updatedDeployment.Name, "namespace", updatedDeployment.Namespace, "labels", updatedDeployment.Labels)
+	// return handleServiceAssociation(k8scli, updatedDeployment.Namespace, updatedDeployment.Labels, deployment.Name)
+	return nil
+}
+
+func handleServiceAssociation(k8scli kubernetes.Clientset, namespace string, resourceName string, labels map[string]string, labelToAvoidStealing string, exposedFQDN string, exposedPorts []corev1.ServicePort) error {
+	service, err := ServiceAssocitedWithResource(k8scli, namespace, labels)
+	if err != nil {
+		slog.Error("Failed to get the service associated with the resource", "error", err)
+		return err
+	}
+	if service == nil {
+		slog.Warn("No service associated with the resource", "resource", resourceName, "namespace", namespace)
+		labels[labelToAvoidStealing] = "true"
+		// service, err = CreateProxyServiceAsRevereseProxy(k8scli, resourceName, namespace, labels, exposedFQDN, exposedPorts, 1)
+		service, err = CreateProxyServiceWithHeadLessType(k8scli, resourceName, namespace, labels, exposedFQDN)
+		if err != nil {
+			slog.Error("Failed to create proxy service", "error", err)
+			return err
+		}
+	}
+	slog.Info("Service associated with the resource", "service", service.Name, "namespace", service.Namespace)
+	return nil
+}
+
+func ServiceAssocitedWithResource(k8scli kubernetes.Clientset, namespace string, lablesMap map[string]string) (*corev1.Service, error) {
+	services, err := k8scli.CoreV1().Services(namespace).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		slog.Error("Failed to list services", "error", err)
+		return nil, err
+	}
+
+	for _, svc := range services.Items {
+		for key, value := range svc.Spec.Selector {
+			if lablesMap[key] == value {
+				slog.Info("Found service associated with the resource", "service", svc.Name, "namespace", svc.Namespace)
+				return &svc, nil
+			}
+		}
+	}
+	return nil, nil
 }
